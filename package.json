@@ -1,0 +1,63 @@
+{
+  "name": "update-pilot",
+  "version": "0.0.1",
+  "description": "One-click safe self-hosted update engine for Node.js apps",
+  "type": "module",
+  "main": "./src/index.js",
+  "types": "./src/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/types/index.d.ts",
+      "import": "./src/index.js",
+      "require": "./src/index.js"
+    },
+    "./adapters/*": {
+      "types": "./src/types/index.d.ts",
+      "import": "./src/adapters/*.js",
+      "require": "./src/adapters/*.js"
+    }
+  },
+  "files": [
+    "src",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "lint": "eslint .",
+    "prepublishOnly": "npm test"
+  },
+  "keywords": [
+    "self-hosted",
+    "auto-update",
+    "docker",
+    "github-releases",
+    "rollback",
+    "deployment",
+    "zero-downtime",
+    "nodejs"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_ORG/update-pilot.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR_ORG/update-pilot/issues"
+  },
+  "homepage": "https://github.com/YOUR_ORG/update-pilot#readme",
+  "dependencies": {
+    "dockerode": "4.0.11",
+    "dockerode-compose": "^1.4.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "eslint": "^9.39.5",
+    "globals": "^17.14.0"
+  }
+}
