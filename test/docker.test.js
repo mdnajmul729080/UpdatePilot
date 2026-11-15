@@ -5,7 +5,14 @@ import { DockerAdapter } from "../src/adapters/docker.js";
 import { DockerError } from "../src/utils/errors.js";
 
 function makeFakeDocker(overrides = {}) {
-  const calls = { pull: [], created: [], removed: [], stopped: 0, started: 0 };
+  const calls = {
+    pull: [],
+    created: [],
+    removed: [],
+    renamed: [],
+    stopped: 0,
+    started: 0,
+  };
   const docker = {
     calls,
     pull: async (image) => {
@@ -22,13 +29,36 @@ function makeFakeDocker(overrides = {}) {
     listContainers: async () => [],
     createContainer: async (options) => {
       calls.created.push(options);
+      const id = calls.created.length === 1 ? "new-id" : "restored-id";
       return {
-        id: "new-id",
+        id,
+        inspect: async () => ({
+          Image: "sha256:candidate-image",
+          NetworkSettings: {
+            Ports: Object.fromEntries(
+              Object.entries(options.HostConfig?.PortBindings ?? {}).map(
+                ([port, bindings]) => [
+                  port,
+                  bindings.map((binding) => ({
+                    ...binding,
+                    HostPort:
+                      binding.HostPort === "0"
+                        ? String(49152 + calls.created.length)
+                        : binding.HostPort,
+                  })),
+                ],
+              ),
+            ),
+          },
+        }),
         start: async () => {
           calls.started += 1;
         },
         stop: async () => {
           calls.stopped += 1;
+        },
+        rename: async ({ name }) => {
+          calls.renamed.push({ id, name });
         },
         remove: async () => {
           calls.removed.push(options.name);
@@ -149,7 +179,7 @@ test("deploy retains the previous container without stopping it", async () => {
   assert.equal(docker.calls.stopped, 0);
 });
 
-test("deploy creates and starts a temporary blue-green container", async () => {
+test("deploy creates and starts a temporary candidate container", async () => {
   const docker = makeFakeDocker();
   const before = Date.now();
   await makeAdapter(docker).deploy("2.0.0");
@@ -159,7 +189,7 @@ test("deploy creates and starts a temporary blue-green container", async () => {
   assert.equal(docker.calls.started, 1);
 });
 
-test("deploy carries forward published port mappings", async () => {
+test("deploy allocates candidate ports without conflicting with the old host port", async () => {
   const docker = makeFakeDocker({
     listContainers: async () => [
       {
@@ -174,10 +204,11 @@ test("deploy carries forward published port mappings", async () => {
       },
     ],
   });
-  await makeAdapter(docker).deploy("2.0.0");
+  const deployment = await makeAdapter(docker).deploy("2.0.0");
   assert.deepEqual(docker.calls.created[0].HostConfig.PortBindings, {
-    "3000/tcp": [{ HostPort: "8080", HostIp: "127.0.0.1" }],
+    "3000/tcp": [{ HostPort: "0", HostIp: "127.0.0.1" }],
   });
+  assert.equal(deployment.candidatePorts["3000/tcp"][0].HostPort, "49153");
 });
 
 test("deploy removes the new container when starting it fails", async () => {
@@ -214,6 +245,11 @@ test("finalize stops and removes the previous container", async () => {
   await adapter.finalize();
   assert.equal(docker.calls.stopped, 1);
   assert.ok(docker.calls.removed.includes("old-id"));
+  assert.ok(
+    docker.calls.renamed.some(
+      ({ id, name }) => id === "new-id" && name === "app",
+    ),
+  );
 });
 
 test("finalize is safe when called twice", async () => {
@@ -221,6 +257,151 @@ test("finalize is safe when called twice", async () => {
   await adapter.deploy("2.0.0");
   assert.deepEqual(await adapter.finalize(), { finalized: true });
   assert.deepEqual(await adapter.finalize(), { finalized: true });
+});
+
+test("rollback after finalize recreates the previous image", async () => {
+  const removedImages = [];
+  const docker = makeFakeDocker({
+    listContainers: async () => [
+      {
+        Id: "old-id",
+        Image: "ghcr.io/org/app:1.0.0",
+        ImageID: "sha256:old-image",
+        Names: ["/app"],
+        State: "running",
+        Status: "Up",
+        Ports: [
+          { PrivatePort: 3000, PublicPort: 8080, Type: "tcp", IP: "127.0.0.1" },
+        ],
+      },
+    ],
+    listImages: async () => [
+      { Id: "sha256:old-image", Created: 1 },
+      { Id: "dangling-2", Created: 2 },
+      { Id: "dangling-3", Created: 3 },
+      { Id: "dangling-4", Created: 4 },
+    ],
+    getImage: (id) => ({
+      remove: async () => removedImages.push(id),
+    }),
+  });
+  const adapter = makeAdapter(docker, { keepImages: 0 });
+
+  await adapter.deploy("2.0.0");
+  await adapter.finalize();
+  assert.ok(!removedImages.includes("sha256:old-image"));
+  assert.deepEqual(removedImages, ["dangling-2", "dangling-3", "dangling-4"]);
+  const result = await adapter.rollback();
+
+  assert.deepEqual(result, {
+    rolledBack: true,
+    restoredContainerId: "restored-id",
+  });
+  assert.equal(docker.calls.created[1].Image, "sha256:old-image");
+  assert.equal(docker.calls.created[1].name, "app");
+  assert.deepEqual(docker.calls.created[1].HostConfig.PortBindings, {
+    "3000/tcp": [{ HostPort: "8080", HostIp: "127.0.0.1" }],
+  });
+  assert.ok(docker.calls.removed.includes("old-id"));
+  await assert.rejects(adapter.rollback(), DockerError);
+});
+
+test("restorePrevious recreates the old service before candidate removal", async () => {
+  const docker = makeFakeDocker({
+    listContainers: async () => [
+      {
+        Id: "old-id",
+        Image: "ghcr.io/org/app:1.0.0",
+        ImageID: "sha256:old-image",
+        Names: ["/app"],
+        State: "running",
+        Status: "Up",
+        Ports: [],
+      },
+    ],
+  });
+  const adapter = makeAdapter(docker);
+
+  await adapter.deploy("2.0.0");
+  await adapter.finalize();
+  const restored = await adapter.restorePrevious();
+
+  assert.deepEqual(restored, { restoredContainerId: "restored-id" });
+  assert.equal(docker.calls.created[1].Image, "sha256:old-image");
+  assert.ok(!docker.calls.removed.includes(docker.calls.created[0].name));
+  assert.ok(
+    docker.calls.renamed.some(
+      ({ id, name }) => id === "new-id" && name !== "app",
+    ),
+  );
+
+  const rollback = await adapter.rollback();
+  assert.deepEqual(rollback, {
+    rolledBack: true,
+    restoredContainerId: "restored-id",
+  });
+  assert.ok(docker.calls.removed.includes(docker.calls.created[0].name));
+});
+
+test("finalize retains active, rollback, and configured tagged prior images", async () => {
+  const removedImages = [];
+  const images = [
+    {
+      Id: "sha256:candidate-image",
+      RepoTags: ["ghcr.io/org/app:2.0.0"],
+      Created: 10,
+    },
+    {
+      Id: "sha256:rollback-image",
+      RepoTags: ["ghcr.io/org/app:1.9.0"],
+      Created: 9,
+    },
+    { Id: "sha256:prior-1", RepoTags: ["ghcr.io/org/app:1.8.0"], Created: 8 },
+    { Id: "sha256:prior-2", RepoTags: ["ghcr.io/org/app:1.7.0"], Created: 7 },
+    {
+      Id: "sha256:other-repository",
+      RepoTags: ["ghcr.io/other/app:5.0.0"],
+      Created: 11,
+    },
+    { Id: "dangling-newest", RepoTags: ["<none>:<none>"], Created: 6 },
+    { Id: "dangling-oldest", RepoTags: ["<none>:<none>"], Created: 5 },
+  ];
+  const docker = makeFakeDocker({
+    listContainers: async () => [
+      {
+        Id: "old-id",
+        Image: "ghcr.io/org/app:1.9.0",
+        ImageID: "sha256:rollback-image",
+        Names: ["/app"],
+        State: "running",
+        Status: "Up",
+        Ports: [],
+      },
+    ],
+    listImages: async () => images,
+    getImage: (id) => ({
+      remove: async () => removedImages.push(id),
+    }),
+  });
+  const adapter = makeAdapter(docker, { keepImages: 1 });
+
+  await adapter.deploy("2.0.0");
+  await adapter.finalize();
+
+  assert.deepEqual(removedImages, ["sha256:prior-2", "dangling-oldest"]);
+  assert.ok(!removedImages.includes("sha256:candidate-image"));
+  assert.ok(!removedImages.includes("sha256:rollback-image"));
+  assert.ok(!removedImages.includes("sha256:prior-1"));
+  assert.ok(!removedImages.includes("sha256:other-repository"));
+  assert.ok(!removedImages.includes("dangling-newest"));
+});
+
+test("rollback rejects when no deployment state exists", async () => {
+  const docker = makeFakeDocker();
+  const adapter = makeAdapter(docker);
+
+  await assert.rejects(adapter.rollback(), DockerError);
+  assert.equal(docker.calls.removed.length, 0);
 });
 
 test("rollback removes the new container and restarts a stopped previous container", async () => {
@@ -304,7 +485,14 @@ test("rollback wraps previous-container restart failure as DockerError", async (
   );
 });
 
-test("compose deploy uses pull and up while retaining previous container", async () => {
+test("compose deploy is rejected before Docker or Compose side effects", async () => {
+  let listContainerCalls = 0;
+  const docker = makeFakeDocker({
+    listContainers: async () => {
+      listContainerCalls += 1;
+      return [];
+    },
+  });
   const calls = [];
   const compose = {
     pull: async () => {
@@ -315,11 +503,21 @@ test("compose deploy uses pull and up while retaining previous container", async
       return { id: "compose-new" };
     },
   };
-  const adapter = makeAdapter(makeFakeDocker(), {
+  const adapter = makeAdapter(docker, {
     composeFile: "compose.yml",
     dockerComposeClient: compose,
   });
-  const result = await adapter.deploy("2.0.0");
-  assert.deepEqual(calls, ["pull", "up"]);
-  assert.equal(result.newContainerId, "compose-new");
+
+  await assert.rejects(
+    adapter.deploy("2.0.0"),
+    (error) =>
+      error instanceof DockerError &&
+      error.context.operation === "deploy" &&
+      error.context.mode === "compose" &&
+      error.message.includes("Compose deployments are disabled"),
+  );
+  assert.deepEqual(docker.calls.pull, []);
+  assert.deepEqual(docker.calls.created, []);
+  assert.equal(listContainerCalls, 0);
+  assert.deepEqual(calls, []);
 });

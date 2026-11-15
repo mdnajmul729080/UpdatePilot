@@ -26,7 +26,13 @@ const DEFAULTS = {
     containerName: ({ repo }) => repo.split("/")[1],
     socketPath: "/var/run/docker.sock",
   },
-  health: { retries: 5, timeout: 5_000, interval: 2_000, expectStatus: 200 },
+  health: {
+    retries: 5,
+    timeout: 5_000,
+    interval: 2_000,
+    expectStatus: 200,
+    headers: {},
+  },
   rollback: { enabled: true, keepImages: 3 },
 };
 
@@ -216,10 +222,23 @@ function resolveConfig(input, resolved = false) {
   const healthInput = assertObject(input.health, "health");
   assertKnownKeys(
     healthInput,
-    ["url", "retries", "timeout", "interval", "expectStatus"],
+    ["url", "retries", "timeout", "interval", "expectStatus", "headers"],
     "health",
   );
   const health = applyDefaults(DEFAULTS.health, healthInput);
+  const headers = assertObject(health.headers, "health.headers");
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.trim() === "")
+      fail(
+        "health.headers",
+        "header names must be non-empty",
+        "non-empty header names",
+        name,
+      );
+    if (typeof value !== "string")
+      fail(`health.headers.${name}`, "must be a string", "string", value);
+  }
+  health.headers = { ...headers };
   const healthUrl = assertString(health.url, "health.url");
   try {
     const parsedUrl = new URL(healthUrl);
@@ -235,12 +254,7 @@ function resolveConfig(input, resolved = false) {
   }
   assertNumberInRange(health.retries, "health.retries", 1, 30, true);
   assertNumberInRange(health.timeout, "health.timeout", 100, 60_000);
-  assertNumberInRange(
-    health.interval,
-    "health.interval",
-    0,
-    Number.MAX_SAFE_INTEGER,
-  );
+  assertNumberInRange(health.interval, "health.interval", 0, 60_000, true);
   assertNumberInRange(
     health.expectStatus,
     "health.expectStatus",

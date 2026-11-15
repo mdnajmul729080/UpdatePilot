@@ -14,15 +14,19 @@ function makeFakeFetch(sequence, onCall = () => {}) {
     if (next instanceof Error) throw next;
     if (next === "hang")
       return new Promise((resolve, reject) => {
-        options.signal.addEventListener(
-          "abort",
-          () => {
-            const error = new Error("aborted");
-            error.name = "AbortError";
-            reject(error);
-          },
-          { once: true },
-        );
+        const safetyTimeout = setTimeout(() => {
+          options.signal.removeEventListener("abort", onAbort);
+          reject(new Error("fake fetch did not receive its abort signal"));
+        }, 2_000);
+        const onAbort = () => {
+          clearTimeout(safetyTimeout);
+          options.signal.removeEventListener("abort", onAbort);
+          const error = new Error("aborted");
+          error.name = "AbortError";
+          reject(error);
+        };
+        options.signal.addEventListener("abort", onAbort, { once: true });
+        if (options.signal.aborted) onAbort();
       });
     return { status: next, ok: next >= 200 && next < 300 };
   };
@@ -43,6 +47,41 @@ test("single success reports a healthy result", async () => {
   assert.equal(result.status, 200);
   assert.equal(result.attempts, 1);
   assert.equal(result.url, "http://localhost/health");
+});
+
+test("check can target a provider-supplied candidate health URL", async () => {
+  let requestedUrl;
+  const adapter = new HealthAdapter({
+    url: "http://localhost/health",
+    fetchImpl: makeFakeFetch([200], (url) => {
+      requestedUrl = url;
+    }),
+    sleepImpl: noSleep,
+  });
+
+  const result = await adapter.check({
+    url: "http://127.0.0.1:49152/ready",
+  });
+
+  assert.equal(requestedUrl, "http://127.0.0.1:49152/ready");
+  assert.equal(result.url, "http://127.0.0.1:49152/ready");
+  assert.equal(adapter.url, "http://localhost/health");
+});
+
+test("failed candidate checks report the candidate URL in error context", async () => {
+  const candidateUrl = "http://127.0.0.1:49152/ready";
+  const adapter = new HealthAdapter({
+    url: "http://localhost/health",
+    retries: 1,
+    fetchImpl: makeFakeFetch([500]),
+    sleepImpl: noSleep,
+  });
+
+  await assert.rejects(
+    adapter.check({ url: candidateUrl }),
+    (error) =>
+      error instanceof HealthCheckError && error.context.url === candidateUrl,
+  );
 });
 
 test("check succeeds on its third attempt", async () => {

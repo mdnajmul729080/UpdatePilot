@@ -5,8 +5,8 @@ import { silentLogger } from "../utils/logger.js";
 import { retry } from "../utils/retry.js";
 
 /** @typedef {{ pulled: true, image: string }} PullResult */
-/** @typedef {{ id: string, name: string, image: string, state: string, status: string }} ContainerInfo */
-/** @typedef {{ success: true, newContainerId: string | null, previousContainerId: string | null }} DeployResult */
+/** @typedef {{ id: string, name: string, image: string, imageId?: string, state: string, status: string }} ContainerInfo */
+/** @typedef {{ success: true, newContainerId: string | null, previousContainerId: string | null, candidatePorts?: Record<string, Array<{ HostIp: string, HostPort: string }>>, healthUrl?: string }} DeployResult */
 /** @typedef {{ finalized: true }} FinalizeResult */
 /** @typedef {{ rolledBack: true, restoredContainerId: string | null }} RollbackResult */
 /** @typedef {{ image?: string, tag?: string, containerName?: string, composeFile?: string, socketPath?: string, logger?: Object, dockerClient?: Object, dockerComposeClient?: Object, keepImages?: number }} DockerAdapterOptions */
@@ -50,6 +50,9 @@ export class DockerAdapter {
     this.keepImages = keepImages;
     this._previousContainer = null;
     this._newContainer = null;
+    this._newContainerName = null;
+    this._newContainerImageId = null;
+    this._newImageTag = null;
     this._deployError = null;
   }
 
@@ -96,6 +99,7 @@ export class DockerAdapter {
         id: entry.Id,
         name: this.containerName,
         image: entry.Image,
+        ...(entry.ImageID ? { imageId: entry.ImageID } : {}),
         state: entry.State,
         status: entry.Status,
       };
@@ -120,12 +124,30 @@ export class DockerAdapter {
    * const deployment = await adapter.deploy("1.2.3");
    */
   async deploy(newTag = this.tag) {
+    if (this.composeFile)
+      throw new DockerError(
+        "Compose deployments are disabled until safe service tracking and rollback are implemented",
+        {
+          context: {
+            operation: "deploy",
+            mode: "compose",
+            composeFile: this.composeFile,
+          },
+        },
+      );
     let created;
     try {
       await this.pull(newTag);
       const previous = await this.getCurrentContainer();
+      const previousPortOptions = previous
+        ? await this._portOptions(previous.id)
+        : {};
       this._previousContainer = previous
-        ? { ...previous, instance: this._getDocker().getContainer(previous.id) }
+        ? {
+            ...previous,
+            instance: this._getDocker().getContainer(previous.id),
+            portOptions: previousPortOptions,
+          }
         : null;
       this._deployError = null;
       const newName = `${this.containerName}-new-${Date.now()}`;
@@ -141,18 +163,29 @@ export class DockerAdapter {
           previousContainerId: previous?.id ?? null,
         };
       }
-      const ports = await this._portOptions(previous?.id);
+      const candidatePortOptions =
+        this._candidatePortOptions(previousPortOptions);
       created = await this._createContainer({
         Image: `${this.image}:${newTag}`,
         name: newName,
-        ...ports,
+        ...candidatePortOptions,
       });
       this._newContainer = created;
+      this._newContainerName = newName;
+      this._newImageTag = newTag;
       await created.start();
+      const details = await created.inspect?.();
+      this._newContainerImageId = details?.Image ?? null;
+      const candidatePorts = Object.fromEntries(
+        Object.entries(details?.NetworkSettings?.Ports ?? {}).filter(
+          ([, bindings]) => Array.isArray(bindings),
+        ),
+      );
       return {
         success: true,
         newContainerId: created.id,
         previousContainerId: previous?.id ?? null,
+        candidatePorts,
       };
     } catch (error) {
       this._deployError = error;
@@ -182,10 +215,21 @@ export class DockerAdapter {
           if (!/not running|304|already stopped/i.test(error.message ?? ""))
             throw error;
         }
+        this._previousContainer = {
+          ...this._previousContainer,
+          state: "exited",
+        };
         await previous.remove({ force: true });
+        this._previousContainer = {
+          ...this._previousContainer,
+          instance: null,
+        };
+      }
+      if (this._newContainer && this._newContainerName !== this.containerName) {
+        await this._newContainer.rename({ name: this.containerName });
+        this._newContainerName = this.containerName;
       }
       await this._pruneImages();
-      this._reset();
       return { finalized: true };
     } catch (error) {
       throw new DockerError("Could not finalize Docker deployment", {
@@ -198,6 +242,42 @@ export class DockerAdapter {
     }
   }
 
+  async restorePrevious() {
+    const previous = this._previousContainer;
+    if (!previous) return { restoredContainerId: null };
+    try {
+      if (previous.instance) {
+        if (previous.state !== "running") await previous.instance.start();
+        this._previousContainer = { ...previous, state: "running" };
+        return { restoredContainerId: previous.id };
+      }
+      if (this._newContainer && this._newContainerName === this.containerName) {
+        const candidateName = `${this.containerName}-candidate-${this._newContainer.id.slice(0, 12)}`;
+        await this._newContainer.rename({ name: candidateName });
+        this._newContainerName = candidateName;
+      }
+      const restored = await this._createContainer({
+        Image: previous.imageId ?? previous.image,
+        name: this.containerName,
+        ...previous.portOptions,
+      });
+      await restored.start();
+      if (!restored.id) throw new Error("Restored container has no identifier");
+      this._previousContainer = {
+        ...previous,
+        id: restored.id,
+        instance: restored,
+        state: "running",
+      };
+      return { restoredContainerId: restored.id };
+    } catch (error) {
+      throw new DockerError("Could not restore the previous Docker container", {
+        cause: error,
+        context: { operation: "restorePrevious", containerId: previous.id },
+      });
+    }
+  }
+
   /**
    * Remove the attempted deployment and restart the previous container if needed.
    * @param {Error} [originalError] Error that caused rollback, such as a failed health check.
@@ -206,6 +286,10 @@ export class DockerAdapter {
    * await adapter.rollback(healthError);
    */
   async rollback(originalError = this._deployError) {
+    if (!this._newContainer && !this._previousContainer)
+      throw new DockerError("No Docker deployment state to roll back", {
+        context: { operation: "rollback" },
+      });
     try {
       if (this._newContainer) {
         try {
@@ -214,12 +298,24 @@ export class DockerAdapter {
           if (!/not running|304|already stopped/i.test(error.message ?? ""))
             throw error;
         }
-        await this._safeRemove(this._newContainer);
+        await this._newContainer.remove({ force: true });
       }
       const previous = this._previousContainer;
-      if (previous?.instance && previous.state !== "running")
-        await previous.instance.start();
-      const restoredContainerId = previous?.id ?? null;
+      let restoredContainerId = null;
+      if (previous?.instance) {
+        if (previous.state !== "running") await previous.instance.start();
+        restoredContainerId = previous.id;
+      } else if (previous) {
+        const restored = await this._createContainer({
+          Image: previous.imageId ?? previous.image,
+          name: this.containerName,
+          ...previous.portOptions,
+        });
+        await restored.start();
+        if (!restored.id)
+          throw new Error("Restored container has no identifier");
+        restoredContainerId = restored.id;
+      }
       this._reset();
       return { rolledBack: true, restoredContainerId };
     } catch (rollbackError) {
@@ -313,13 +409,71 @@ export class DockerAdapter {
     });
   }
 
+  _candidatePortOptions(portOptions) {
+    const portBindings = portOptions.HostConfig?.PortBindings;
+    if (!portBindings) return portOptions;
+    return {
+      ...portOptions,
+      HostConfig: {
+        ...portOptions.HostConfig,
+        PortBindings: Object.fromEntries(
+          Object.entries(portBindings).map(([port, bindings]) => [
+            port,
+            bindings.map((binding) => ({ ...binding, HostPort: "0" })),
+          ]),
+        ),
+      },
+    };
+  }
+
   async _pruneImages() {
     const docker = this._getDocker();
-    const images = await docker.listImages({ filters: { dangling: ["true"] } });
-    const oldest = images.sort((a, b) => (a.Created ?? 0) - (b.Created ?? 0));
-    for (const image of oldest.slice(
+    const images = await docker.listImages();
+    const repoTagPrefix = `${this.image}:`;
+    const taggedImages = images.filter((image) =>
+      image.RepoTags?.some(
+        (repoTag) =>
+          repoTag.startsWith(repoTagPrefix) && repoTag !== "<none>:<none>",
+      ),
+    );
+    const previous = this._previousContainer;
+    const currentTaggedImage = taggedImages.find(
+      (image) =>
+        image.Id === this._newContainerImageId ||
+        image.RepoTags?.includes(`${this.image}:${this._newImageTag}`),
+    );
+    const previousTaggedImage = taggedImages.find(
+      (image) =>
+        image.Id === previous?.imageId ||
+        image.RepoTags?.includes(previous?.image),
+    );
+    const protectedImageIds = new Set(
+      [
+        this._newContainerImageId,
+        currentTaggedImage?.Id,
+        previous?.imageId,
+        previousTaggedImage?.Id,
+      ].filter(Boolean),
+    );
+    const priorTaggedImages = taggedImages
+      .filter((image) => !protectedImageIds.has(image.Id))
+      .sort((a, b) => (b.Created ?? 0) - (a.Created ?? 0));
+    for (const image of priorTaggedImages.slice(this.keepImages)) {
+      await docker.getImage(image.Id).remove({ force: true });
+    }
+
+    const danglingImages = images
+      .filter(
+        (image) =>
+          !protectedImageIds.has(image.Id) &&
+          !image.RepoTags?.some(
+            (repoTag) => repoTag && repoTag !== "<none>:<none>",
+          ),
+      )
+      .sort((a, b) => (a.Created ?? 0) - (b.Created ?? 0));
+    for (const image of danglingImages.slice(
       0,
-      Math.max(0, oldest.length - this.keepImages),
+      Math.max(0, danglingImages.length - this.keepImages),
     )) {
       await docker.getImage(image.Id).remove({ force: true });
     }
@@ -328,6 +482,9 @@ export class DockerAdapter {
   _reset() {
     this._previousContainer = null;
     this._newContainer = null;
+    this._newContainerName = null;
+    this._newContainerImageId = null;
+    this._newImageTag = null;
     this._deployError = null;
   }
 }

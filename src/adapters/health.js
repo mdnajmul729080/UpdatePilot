@@ -77,67 +77,88 @@ export class HealthAdapter {
 
   /**
    * Check the endpoint until it succeeds or all attempts fail.
-   * @param {{ signal?: AbortSignal }} [options] Optional caller cancellation signal.
+   * @param {{ signal?: AbortSignal, url?: string }} [options] Optional candidate endpoint and cancellation signal.
    * @returns {Promise<HealthCheckResult>} Successful health result and attempt metadata.
    * @example
    * const result = await adapter.check({ signal: AbortSignal.timeout(10000) });
    */
-  async check({ signal } = {}) {
+  async check({ signal, url = this.url } = {}) {
+    const targetUrl = this._resolveUrl(url);
     let lastAttempt;
     for (let attempt = 1; attempt <= this.retries; attempt += 1) {
-      if (signal?.aborted) throw this._abortedError(signal.reason);
+      if (signal?.aborted) throw this._abortedError(signal.reason, targetUrl);
       lastAttempt = await this._attempt(
         this._combineSignals(this.timeout, signal),
+        targetUrl,
       );
-      if (signal?.aborted) throw this._abortedError(signal.reason);
-      if (lastAttempt.ok) return this._result(lastAttempt, attempt);
-      this._logFailure(lastAttempt, attempt);
+      if (signal?.aborted) throw this._abortedError(signal.reason, targetUrl);
+      if (lastAttempt.ok) return this._result(lastAttempt, attempt, targetUrl);
+      this._logFailure(lastAttempt, attempt, targetUrl);
       if (attempt < this.retries) {
         try {
           await this.sleepImpl(this.interval, signal);
         } catch (error) {
           if (signal?.aborted || error?.name === "AbortError")
-            throw this._abortedError(signal?.reason ?? error);
+            throw this._abortedError(signal?.reason ?? error, targetUrl);
           throw new HealthCheckError("Health check retry delay failed", {
             cause: error,
-            context: { url: this.url, operation: "sleep" },
+            context: { url: targetUrl, operation: "sleep" },
           });
         }
-        if (signal?.aborted) throw this._abortedError(signal.reason);
+        if (signal?.aborted) throw this._abortedError(signal.reason, targetUrl);
       }
     }
-    throw this._failure(lastAttempt, this.retries);
+    throw this._failure(lastAttempt, this.retries, targetUrl);
   }
 
   /**
    * Perform one health request without retrying.
-   * @param {{ signal?: AbortSignal }} [options] Optional caller cancellation signal.
+   * @param {{ signal?: AbortSignal, url?: string }} [options] Optional candidate endpoint and cancellation signal.
    * @returns {Promise<HealthCheckResult>} Successful health result for the single attempt.
    * @example
    * const probe = await adapter.checkOnce();
    */
-  async checkOnce({ signal } = {}) {
-    if (signal?.aborted) throw this._abortedError(signal.reason);
+  async checkOnce({ signal, url = this.url } = {}) {
+    const targetUrl = this._resolveUrl(url);
+    if (signal?.aborted) throw this._abortedError(signal.reason, targetUrl);
     const attempt = await this._attempt(
       this._combineSignals(this.timeout, signal),
+      targetUrl,
     );
-    if (signal?.aborted) throw this._abortedError(signal.reason);
+    if (signal?.aborted) throw this._abortedError(signal.reason, targetUrl);
     if (!attempt.ok) {
-      this._logFailure(attempt, 1);
-      throw this._failure(attempt, 1);
+      this._logFailure(attempt, 1, targetUrl);
+      throw this._failure(attempt, 1, targetUrl);
     }
-    return this._result(attempt, 1);
+    return this._result(attempt, 1, targetUrl);
   }
 
   /**
    * Alias for check(), named for deployment lifecycle readability.
-   * @param {{ signal?: AbortSignal }} [options] Optional caller cancellation signal.
+   * @param {{ signal?: AbortSignal, url?: string }} [options] Optional candidate endpoint and cancellation signal.
    * @returns {Promise<HealthCheckResult>} Successful health result.
    * @example
    * await adapter.waitUntilHealthy();
    */
-  async waitUntilHealthy({ signal } = {}) {
-    return this.check({ signal });
+  async waitUntilHealthy({ signal, url } = {}) {
+    return this.check({ signal, url });
+  }
+
+  _resolveUrl(url) {
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      // Invalid URLs are reported through the validation below.
+    }
+    if (!parsed || !["http:", "https:"].includes(parsed.protocol))
+      this._configError(
+        "url",
+        "HealthAdapter: url must be a valid http(s) URL",
+        url,
+        "HTTP(S) URL",
+      );
+    return parsed.href;
   }
 
   _assertInteger(field, value, minimum, maximum) {
@@ -211,10 +232,10 @@ export class HealthAdapter {
     return controller.signal;
   }
 
-  async _attempt(signal) {
+  async _attempt(signal, url = this.url) {
     const started = performance.now();
     try {
-      const response = await this.fetchImpl(this.url, {
+      const response = await this.fetchImpl(url, {
         method: "GET",
         headers: this.headers,
         signal,
@@ -239,10 +260,10 @@ export class HealthAdapter {
     }
   }
 
-  _result(attempt, attempts) {
+  _result(attempt, attempts, url = this.url) {
     return {
       healthy: /** @type {true} */ (true),
-      url: this.url,
+      url,
       status: attempt.status,
       attempts,
       latencyMs: attempt.latencyMs,
@@ -250,10 +271,10 @@ export class HealthAdapter {
     };
   }
 
-  _logFailure(attempt, number) {
+  _logFailure(attempt, number, url = this.url) {
     try {
       this.logger.debug("Health check attempt failed", {
-        url: this.url,
+        url,
         attempt: number,
         status: attempt.status,
         reason: attempt.reason,
@@ -263,14 +284,14 @@ export class HealthAdapter {
     }
   }
 
-  _failure(attempt, attempts) {
+  _failure(attempt, attempts, url = this.url) {
     const reason = attempt?.reason ?? "network";
     return new HealthCheckError(
       `Health check failed after ${attempts} attempts: ${reason}`,
       {
         cause: attempt?.error,
         context: {
-          url: this.url,
+          url,
           attempts,
           lastStatus: attempt?.status ?? null,
           lastReason: reason,
@@ -280,10 +301,10 @@ export class HealthAdapter {
     );
   }
 
-  _abortedError(cause) {
+  _abortedError(cause, url = this.url) {
     return new HealthCheckError("Health check aborted by caller", {
       cause,
-      context: { url: this.url, reason: "aborted" },
+      context: { url, reason: "aborted" },
     });
   }
 }

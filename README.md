@@ -12,7 +12,7 @@ One-click safe self-hosted update engine for Node.js apps
 [![npm downloads](https://img.shields.io/npm/dm/update-pilot)](https://github.com/YOUR_ORG/update-pilot)
 [![CI status](https://img.shields.io/github/actions/workflow/status/YOUR_ORG/update-pilot/ci.yml?branch=main)](https://github.com/YOUR_ORG/update-pilot)
 [![License: MIT](https://img.shields.io/github/license/YOUR_ORG/update-pilot)](https://github.com/YOUR_ORG/update-pilot)
-[![Node version: >=20](https://img.shields.io/badge/node-%3E%3D20-brightgreen)](https://github.com/YOUR_ORG/update-pilot)
+[![Node version: 20.19+ or 22.12+](https://img.shields.io/badge/node-20.19%2B%20%7C%2022.12%2B-brightgreen)](https://nodejs.org/api/modules.html#loading-ecmascript-modules-using-require)
 [![GitHub stars](https://img.shields.io/github/stars/YOUR_ORG/update-pilot)](https://github.com/YOUR_ORG/update-pilot)
 
 > 🚧 **Status: Early Development** — API may change before v1.0.0
@@ -23,7 +23,9 @@ UpdatePilot lets you add a **Check for Updates** action to an existing
 administration panel. It watches GitHub Releases for a newer version, pulls
 the corresponding Docker image, starts the new version, and checks whether
 the application is healthy before treating the update as successful. If that
-check fails, UpdatePilot automatically rolls back to the previous version.
+check fails, UpdatePilot asks the configured traffic router to restore the
+previous route and rolls back the candidate. A router provider is supplied by
+the application; the package does not bundle a proxy integration.
 There is no separate dashboard to operate, no hosted update service to rely
 on, and no need to move the application's release process away from GitHub.
 Connect the library to the Node.js app you already run, expose the update
@@ -48,10 +50,10 @@ function call.
   Podman and Kubernetes identified as future adapter directions.
   Release lookup, container operations, and health checks remain separate
   so a future provider can fit the same update lifecycle.
-- **Small, focused installation.** The intended install size is under 100 KB,
-  with no runtime dependencies beyond three core libraries.
-  The package focuses on update orchestration instead of shipping a hosted
-  service or a separate administrative application.
+- **Focused package footprint.** The current compressed npm package is about
+  34 KB; the installed footprint also includes runtime dependencies for Docker
+  operations. The package focuses on update orchestration instead of shipping
+  a hosted service or a separate administrative application.
 - **MIT and self-hosted.** Run updates in your own environment and retain
   control of your release and deployment process.
   Your application controls the route, permissions, and interface used to
@@ -59,28 +61,33 @@ function call.
 
 ## 📦 Installation
 
-UpdatePilot requires Node.js 20 or later and a Docker-based application
-deployment. Install the package in the Node.js service that owns your admin
-panel:
+UpdatePilot supports Node.js `^20.19.0 || >=22.12.0` and non-Compose Docker
+deployments. Install it in the Node.js service that owns your admin panel:
 
 ```bash
 npm install update-pilot
 ```
 
 Run the installation from the application that will initiate updates. The
-package's public entry point is intended to be imported by that service, and
-the Docker host must be the one that manages the target Compose deployment.
+package's public entry point can be imported from ESM. CommonJS `require()` is
+supported through Node's synchronous ESM interop on the declared versions; the
+module graph must remain free of top-level `await`. Node marks this interop
+experimental in some supported releases, so ESM imports are preferred.
 
 The package is designed to be called by your application. It does not
 introduce a hosted control plane or require a separate UpdatePilot service.
 The application's own deployment and authorization policies remain in force;
-installing the package does not create an externally hosted endpoint.
+installing the package does not create an externally hosted endpoint. The
+built-in non-Compose Docker adapter requires a project-provided `trafficRouter`
+for candidate-only health checks and traffic switching; no router backend is
+bundled.
 
 ## 🚀 Quick Start
 
-The following example shows the intended integration shape: describe the
-release repository and Docker deployment, configure a health endpoint, then
-call the update operation from a protected admin route.
+The following example shows the integration shape: describe the release
+repository and Docker deployment, configure a health endpoint, inject a
+project-specific `trafficRouter`, then call the update operation from a
+protected admin route. UpdatePilot does not include a built-in router provider.
 
 The configuration belongs to the Node.js process that performs the update.
 Keep the configured current version aligned with the version actually
@@ -97,7 +104,6 @@ export default defineConfig({
   repo: "YOUR_ORG/YOUR_APP",
   currentVersion: process.env.APP_VERSION,
   docker: {
-    composeFile: "./docker-compose.yml",
     image: "ghcr.io/YOUR_ORG/YOUR_APP",
   },
   health: {
@@ -114,9 +120,10 @@ Create `app.js` in the same project:
 import express from "express";
 import { UpdatePilot } from "update-pilot";
 import updateConfig from "./update.config.js";
+import trafficRouter from "./traffic-router.js";
 
 const app = express();
-const updatePilot = new UpdatePilot(updateConfig);
+const updatePilot = new UpdatePilot(updateConfig, { trafficRouter });
 
 app.post("/admin/update", async (request, response, next) => {
   try {
@@ -157,14 +164,14 @@ in this shape:
 }
 ```
 
-The example assumes that the release version, Docker image, compose file, and
-health URL are appropriate for your own deployment. Replace the placeholder
-repository and image names before using the configuration.
+The example assumes that the release version, Docker image, and health URL are
+appropriate for your own deployment. Replace the placeholder repository and
+image names before using the configuration. Compose deployment is disabled.
 
 Treat the values in the sample as an application-specific starting point.
 The repository value identifies where releases are checked, while the image
-and Compose file identify how the local deployment is changed. The health
-URL should refer to the same application version being prepared.
+identifies the application deployment. The health URL should refer to the same
+application version being prepared.
 
 The configured current version should be maintained by the application as
 part of its release process. Keeping it accurate makes release comparisons
@@ -185,8 +192,9 @@ administrative action.
 ## 🧠 How It Works
 
 ```text
-GitHub Releases → Check version → Pull Docker image
-→ Compose up → Health check → ✅ Success | ❌ Rollback
+GitHub Releases → Pull candidate → Prepare router endpoint
+→ Candidate health check → Switch traffic → Finalize
+                                  ↘ failure: restore route and rollback
 ```
 
 1. **Find a release.** The GitHub adapter checks the configured repository for
@@ -194,17 +202,38 @@ GitHub Releases → Check version → Pull Docker image
    This makes the project's published release the input to the update check.
    If there is no newer version, the deployment stage has no new version to
    install.
-2. **Prepare the deployment.** When a newer version is available, the Docker
-   adapter pulls its image and starts the updated container through Compose.
-   The existing container remains available while the new version is being
-   prepared, so verification can happen before traffic switches.
-3. **Verify the application.** The health adapter requests the configured
-   health URL using the configured retry and timeout limits. The endpoint
-   should indicate that the application is ready, not simply that a process
-   has started.
-4. **Finish or recover.** A healthy deployment is reported as successful; an
-   unhealthy deployment rolls back to the previous version. The caller
-   receives a result that can be used by the application's admin interface.
+2. **Prepare the candidate.** The non-Compose Docker adapter keeps the old
+   container running and requests a dynamic host port for the candidate, so
+   the two containers do not claim the same fixed host port.
+3. **Prepare and verify routing.** The injected router provider prepares a
+   candidate-only health endpoint. The health adapter probes that endpoint;
+   the existing application route remains the provider's responsibility.
+4. **Switch or recover.** Only after health succeeds does the engine call the
+   provider's `switch()`, then finalize the deployment. Health or switch
+   failure calls `rollback()` and removes the candidate. The provider must
+   restore the previous route safely.
+
+### Traffic Router Provider
+
+The `trafficRouter` dependency is a provider-neutral interface selected by
+each application. Implement `prepare(deployment)` to return a candidate-only
+`healthUrl` and optional opaque `context`; implement `switch(deployment,
+context)` to route production traffic to the candidate; implement
+`rollback(deployment, context, reason)` to restore the prior route or discard
+prepared state. `rollback()` should be idempotent and safe after either a
+health failure or a partial switch failure.
+
+The deployment argument includes the old and candidate container IDs, version
+transition, configured health URL, and candidate port mappings. The provider
+must keep the old route active until `switch()` is called. UpdatePilot fails
+closed before deployment when its built-in Docker adapter is used without a
+valid provider. A custom Docker adapter may own the handoff itself. No
+Traefik, Caddy, Nginx, or other built-in provider is included; the application
+must supply an implementation that matches its actual routing environment.
+
+Docker Compose deployments do not yet implement this candidate/router
+contract and are not production-ready; Compose behavior remains a separate
+roadmap phase.
 
 The update is initiated by your Node.js application, so the release check and
 deployment can be presented as one action in the admin experience you already
@@ -223,7 +252,7 @@ policy. Required values should be supplied explicitly for each application.
 | -------------------- | ---------- | ------------- | ---------------------------------------------------------------- |
 | `repo`               | `string`   | None          | GitHub repository in `owner/name` form; the source for releases. |
 | `currentVersion`     | `string`   | None          | Version currently running; compared with the latest release.     |
-| `docker.composeFile` | `string`   | None          | Path to the Compose file used to deploy the application.         |
+| `docker.composeFile` | `string`   | None          | Retained for compatibility; deployment is rejected when set.     |
 | `docker.image`       | `string`   | None          | Docker image used for the application deployment.                |
 | `health.url`         | `string`   | None          | HTTP endpoint requested to verify application health.            |
 | `health.retries`     | `number`   | Not specified | Number of health-check attempts configured for verification.     |
@@ -258,19 +287,10 @@ as a version the update operation should silently infer from another source.
 
 ### Docker Deployment
 
-Set `docker.composeFile` to the Compose configuration used by the deployment
-and `docker.image` to the image to pull. The image should correspond to the
-release version being deployed; UpdatePilot is intended to deploy versioned
-releases rather than rely on a moving `latest` tag.
-The Compose file should describe the application services that participate
-in the update. Ensure the image reference corresponds to the release version
-that the GitHub adapter reports, and make the Compose file accessible to the
-process performing the update.
-Review the Compose file before enabling the route to ensure that it targets
-the intended application. A deployment process should not be pointed at a
-development or staging file when the route is intended to update production.
-Keep the image reference and release version aligned so the update result
-describes the code that the administrator expected to install.
+Set `docker.image` to the application image and keep its release tags aligned
+with the GitHub release tags. The built-in adapter supports non-Compose Docker
+deployments only. Setting `docker.composeFile` is rejected before Docker side
+effects; Compose update support has not been implemented.
 
 ### Health Verification
 
@@ -305,51 +325,28 @@ for the environment where updates run. Keep callback work bounded, and make
 callbacks safe to run as part of the deployment lifecycle because they are
 invoked around an operation that may affect the running application.
 
-## 🛡️ Safety Guarantees
+## 🛡️ Safety Requirements and Limits
 
-UpdatePilot is designed around the assumption that a new container should be
-verified before it replaces the currently serving version. The guarantees
-below describe the intended deployment behavior and are particularly
-important for applications that update themselves:
+- The built-in non-Compose Docker adapter allocates candidate ports
+  dynamically and leaves the old container running during candidate health
+  verification.
+- Health-before-switch is provided only when the application injects a
+  `trafficRouter` that keeps the old route active until `switch()` succeeds.
+  The package includes the contract, not a router backend.
+- Without a valid router, the built-in Docker adapter rejects an update before
+  Docker deployment. A custom Docker adapter without a router is responsible
+  for its own candidate health and traffic handoff behavior.
+- No zero-downtime, fixed rollback-time, Git-SHA pinning, or immutable-image
+  guarantee is provided. Images are selected by their configured tag.
+- Compose mode has not yet been verified against the router contract. Do not
+  treat it as production-ready until its roadmap phase is complete.
+- The opt-in Docker integration test requires a local Docker daemon and a
+  pre-pulled HTTP image. Unit tests with fake providers do not prove a specific
+  proxy integration or production routing configuration.
 
-- **Health before traffic switch.** The new version is checked before traffic
-  switches to it, following a blue-green deployment pattern.
-- **Bounded recovery.** When health verification fails, automatic rollback is
-  intended to complete within 30 seconds.
-- **Version identity.** Deployments are pinned to a Git SHA rather than the
-  mutable `latest` tag, so the release being installed is identifiable.
-- **Old version retained.** The old container remains alive during deployment
-  and is available while the new version is being verified.
-- **Cached release checks.** A cache file stores GitHub response data to help
-  avoid unnecessary requests and reduce exposure to API rate limits.
-
-These safeguards make rollback part of the update path rather than a separate
-manual procedure. Configure the health endpoint carefully: it should indicate
-that the application is ready to serve traffic, not merely that a process
-exists.
-The guarantees rely on the configured image, Compose deployment, and health
-endpoint describing the real application. A health check cannot detect
-failures that its endpoint does not represent, so choose a check that covers
-the readiness conditions that matter to your service.
-
-Keep release versions traceable to the images you publish. Using an immutable
-Git SHA avoids ambiguity when an image tag could otherwise point at different
-content over time. Retaining the old container until verification also gives
-the rollback path a known version to restore.
-
-UpdatePilot's automatic rollback is intended to be a bounded recovery action,
-not a substitute for monitoring or an incident response process. Operators
-should continue to review the update result and the application's health
-after a deployment, especially when introducing a major release.
-The 30-second rollback target is a stated safety objective for a failed
-health check. Actual time also depends on the Docker host and the operations
-needed to restore the previous container. Keep the health retry and timeout
-settings aligned with the recovery window expected by your operators.
-
-The Git SHA pin and retained old container work together: the deployment
-identifies an exact version and keeps a previous version available while the
-new one is evaluated. This avoids treating a mutable image label as proof of
-which code is serving traffic.
+Choose a health endpoint that indicates application readiness, and keep
+monitoring and incident-response procedures in place. A health check only
+covers the conditions represented by its endpoint.
 
 ## 🧩 Adapters
 
@@ -358,19 +355,20 @@ verification behind focused interfaces. The first three adapters form the
 Docker-based MVP; the remaining entries are planned directions, not current
 deployment targets.
 
-| Adapter           | Status     |
-| ----------------- | ---------- |
-| GitHub (releases) | ✅ MVP     |
-| Docker (compose)  | ✅ MVP     |
-| HTTP Health       | ✅ MVP     |
-| Podman            | 🚧 Planned |
-| Kubernetes        | 🚧 Planned |
-| GitLab Releases   | 🚧 Planned |
+| Adapter              | Status                      |
+| -------------------- | --------------------------- |
+| GitHub (releases)    | ✅ MVP                      |
+| Docker (non-Compose) | 🚧 Router provider required |
+| Docker Compose       | 🚧 Not production-ready     |
+| HTTP Health          | ✅ MVP                      |
+| Podman               | 🚧 Planned                  |
+| Kubernetes           | 🚧 Planned                  |
+| GitLab Releases      | 🚧 Planned                  |
 
-The MVP adapters cover the three boundaries needed by the described update
-flow: release discovery, Docker Compose deployment, and HTTP health
-verification. Keeping these responsibilities distinct allows the engine to
-coordinate them without making each adapter responsible for the whole update.
+The current adapters cover release discovery, Docker operations, and HTTP
+health verification. Non-Compose traffic switching requires an injected
+provider; Compose deployment has not yet been reconciled with candidate
+health, routing, and rollback.
 
 Podman, Kubernetes, and GitLab Releases are roadmap directions. Their
 presence in the table does not mean they are available in the current
@@ -379,15 +377,14 @@ package; use the adapters marked MVP for the Docker-based integration.
 ### MVP Integration Boundary
 
 The GitHub adapter answers which release is available. The Docker adapter
-handles the Compose-based deployment, and the health adapter decides whether
+handles the non-Compose candidate deployment, and the health adapter decides whether
 the new version is ready according to the configured endpoint. The engine
 coordinates these roles in order and uses the rollback path when verification
 does not pass.
 
-This boundary is intended to keep provider details out of application route
-handlers. Applications invoke the engine and present its outcome; they do not
-need to implement GitHub release lookup or Docker update sequencing in each
-admin route.
+This boundary keeps provider details out of application route handlers.
+Applications invoke the engine and present its outcome, while supplying a
+router implementation appropriate to their deployment environment.
 
 ## 📚 Documentation
 

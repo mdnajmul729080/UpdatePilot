@@ -4,6 +4,7 @@ import { UpdatePilot } from "../src/core/engine.js";
 import {
   ConfigError,
   DockerError,
+  GitHubError,
   HealthCheckError,
   RollbackError,
   UpdateInProgressError,
@@ -39,17 +40,21 @@ function makeFakeDocker({
   deployFails = false,
   rollbackFails = false,
   finalizeFails = false,
+  previousContainerId = "prev-id",
 } = {}) {
   const calls = { deploy: 0, rollback: 0, finalize: 0 };
+  const deployedTags = [];
   return {
     calls,
-    deploy: async () => {
+    deployedTags,
+    deploy: async (tag) => {
       calls.deploy += 1;
+      deployedTags.push(tag);
       if (deployFails) throw new DockerError("deploy failed");
       return {
         success: true,
         newContainerId: "new-id",
-        previousContainerId: "prev-id",
+        previousContainerId,
       };
     },
     finalize: async () => {
@@ -57,6 +62,7 @@ function makeFakeDocker({
       if (finalizeFails) throw new DockerError("finalize failed");
       return { finalized: true };
     },
+    restorePrevious: async () => ({ restoredContainerId: "prev-id" }),
     rollback: async () => {
       calls.rollback += 1;
       if (rollbackFails) throw new DockerError("rollback failed");
@@ -65,18 +71,20 @@ function makeFakeDocker({
   };
 }
 
+/** @param {{ healthy?: boolean }} [options] */
 function makeFakeHealth({ healthy = true } = {}) {
   let calls = 0;
   return {
     get calls() {
       return calls;
     },
-    check: async () => {
+    /** @param {{ url?: string }} [options] */
+    check: async ({ url } = {}) => {
       calls += 1;
       if (!healthy) {
         const error = new HealthCheckError("health failed");
         error.context = {
-          url: "http://x/health",
+          url: url ?? "http://x/health",
           attempts: 5,
           lastStatus: 500,
         };
@@ -84,7 +92,7 @@ function makeFakeHealth({ healthy = true } = {}) {
       }
       return {
         healthy: true,
-        url: "http://x/health",
+        url: url ?? "http://x/health",
         status: 200,
         attempts: 1,
         latencyMs: 42,
@@ -94,12 +102,37 @@ function makeFakeHealth({ healthy = true } = {}) {
   };
 }
 
-/** @param {{ github?: any, docker?: any, health?: any, hooks?: Record<string, Function>, config?: any }} [options] */
+function makeFakeTrafficRouter(
+  events = [],
+  { prepareError = null, switchError = null, rollbackError = null } = {},
+) {
+  return {
+    prepare: async () => {
+      events.push("prepare");
+      if (prepareError) throw prepareError;
+      return {
+        healthUrl: "http://candidate.test/health",
+        context: { route: "candidate" },
+      };
+    },
+    switch: async () => {
+      events.push("switch");
+      if (switchError) throw switchError;
+    },
+    rollback: async () => {
+      events.push("router-rollback");
+      if (rollbackError) throw rollbackError;
+    },
+  };
+}
+
+/** @param {{ github?: any, docker?: any, health?: any, trafficRouter?: any, hooks?: Record<string, Function>, config?: any }} [options] */
 function makePilot(options = {}) {
   const {
     github = makeFakeGitHub(),
     docker = makeFakeDocker(),
     health = makeFakeHealth(),
+    trafficRouter = makeFakeTrafficRouter(),
     hooks,
     config = {},
   } = options;
@@ -116,10 +149,12 @@ function makePilot(options = {}) {
       githubAdapter: github,
       dockerAdapter: docker,
       healthAdapter: health,
+      trafficRouter,
     }),
     github,
     docker,
     health,
+    trafficRouter,
   };
 }
 
@@ -152,6 +187,109 @@ test("success result includes version, container, latency, and duration", async 
   assert.ok(updated.durationMs >= 0);
 });
 
+test("candidate health passes before the router switches traffic", async () => {
+  const events = [];
+  const health = {
+    ...makeFakeHealth(),
+    /** @param {{ url?: string }} [options] */
+    check: async ({ url } = {}) => {
+      events.push(`health:${url}`);
+      return makeFakeHealth().check({ url });
+    },
+  };
+  const { pilot } = makePilot({
+    health,
+    trafficRouter: makeFakeTrafficRouter(events),
+  });
+
+  assert.equal((await pilot.runUpdate()).status, "updated");
+  assert.deepEqual(events, [
+    "prepare",
+    "health:http://candidate.test/health",
+    "switch",
+  ]);
+});
+
+test("deployments fail closed when no traffic router is provided", async () => {
+  const pilot = new UpdatePilot(
+    {
+      repo: "org/app",
+      currentVersion: "1.2.3",
+      docker: { image: "ghcr.io/org/app" },
+      health: { url: "http://x/health" },
+    },
+    { githubAdapter: makeFakeGitHub(), healthAdapter: makeFakeHealth() },
+  );
+
+  await assert.rejects(pilot.runUpdate(), ConfigError);
+});
+
+test("health failure restores routing before rolling back Docker", async () => {
+  const events = [];
+  const docker = makeFakeDocker();
+  const dockerRollback = docker.rollback;
+  docker.rollback = async () => {
+    events.push("docker-rollback");
+    return dockerRollback();
+  };
+  const { pilot } = makePilot({
+    docker,
+    health: makeFakeHealth({ healthy: false }),
+    trafficRouter: makeFakeTrafficRouter(events),
+  });
+
+  assert.equal((await pilot.runUpdate()).status, "rolled-back");
+  assert.deepEqual(events, ["prepare", "router-rollback", "docker-rollback"]);
+});
+
+test("router switch failure restores both route and candidate", async () => {
+  const events = [];
+  const docker = makeFakeDocker();
+  const dockerRollback = docker.rollback;
+  docker.rollback = async () => {
+    events.push("docker-rollback");
+    return dockerRollback();
+  };
+  const { pilot } = makePilot({
+    docker,
+    trafficRouter: makeFakeTrafficRouter(events, {
+      switchError: new Error("router unavailable"),
+    }),
+  });
+
+  await assert.rejects(
+    pilot.runUpdate(),
+    (error) =>
+      error instanceof UpdatePilotError && error.context.phase === "switch",
+  );
+  assert.deepEqual(events, [
+    "prepare",
+    "switch",
+    "router-rollback",
+    "docker-rollback",
+  ]);
+  assert.equal(docker.calls.finalize, 0);
+});
+
+test("router preparation failure removes the candidate and preserves the old route", async () => {
+  const events = [];
+  const docker = makeFakeDocker();
+  const dockerRollback = docker.rollback;
+  docker.rollback = async () => {
+    events.push("docker-rollback");
+    return dockerRollback();
+  };
+  const { pilot } = makePilot({
+    docker,
+    trafficRouter: makeFakeTrafficRouter(events, {
+      prepareError: new Error("candidate route unavailable"),
+    }),
+  });
+
+  await assert.rejects(pilot.runUpdate(), UpdatePilotError);
+  assert.deepEqual(events, ["prepare", "router-rollback", "docker-rollback"]);
+});
+
 test("checkOnly returns update information without touching Docker", async () => {
   const { pilot, docker } = makePilot();
   assert.equal((await pilot.checkOnly()).updateAvailable, true);
@@ -165,12 +303,43 @@ test("runUpdate returns up-to-date when no release is newer", async () => {
   assert.equal((await pilot.runUpdate()).status, "up-to-date");
 });
 
-test("force proceeds when no release is newer", async () => {
+test("force redeploys a valid release even when no release is newer", async () => {
   const { pilot, docker } = makePilot({
     github: makeFakeGitHub({ updateAvailable: false }),
   });
   assert.equal((await pilot.runUpdate({ force: true })).status, "updated");
   assert.equal(docker.calls.deploy, 1);
+  assert.deepEqual(docker.deployedTags, ["1.3.0"]);
+});
+
+test("engine passes a selected SHA release tag to Docker unchanged", async () => {
+  const tag = "abcdef1234567";
+  const { pilot, docker } = makePilot({
+    github: makeFakeGitHub({ latestVersion: tag }),
+  });
+
+  const result = await pilot.runUpdate();
+
+  if (result.status !== "updated") throw new Error("Expected an update");
+  assert.equal(result.to, tag);
+  assert.deepEqual(docker.deployedTags, [tag]);
+});
+
+test("force rejects when no eligible release exists before deployment", async () => {
+  const events = [];
+  const { pilot, docker } = makePilot({
+    github: makeFakeGitHub({ updateAvailable: false, latestVersion: null }),
+    trafficRouter: makeFakeTrafficRouter(events),
+  });
+
+  await assert.rejects(pilot.runUpdate({ force: true }), (error) => {
+    assert.ok(error instanceof GitHubError);
+    assert.equal(error.code, "E_GITHUB");
+    assert.equal(error.context.phase, "check");
+    return true;
+  });
+  assert.equal(docker.calls.deploy, 0);
+  assert.deepEqual(events, []);
 });
 
 test("dry run does not deploy, finalize, or check health", async () => {
@@ -195,6 +364,27 @@ test("health failure calls rollback and skips finalize", async () => {
   await pilot.runUpdate();
   assert.equal(docker.calls.rollback, 1);
   assert.equal(docker.calls.finalize, 0);
+});
+
+test("disabled automatic rollback leaves the candidate available for manual recovery", async () => {
+  const events = [];
+  const { pilot, docker } = makePilot({
+    health: makeFakeHealth({ healthy: false }),
+    trafficRouter: makeFakeTrafficRouter(events),
+    config: { rollback: { enabled: false } },
+  });
+
+  await assert.rejects(pilot.runUpdate(), HealthCheckError);
+  assert.deepEqual(events, ["prepare", "router-rollback"]);
+  assert.equal(docker.calls.rollback, 0);
+  assert.equal(docker.calls.finalize, 0);
+
+  assert.deepEqual(await pilot.rollback(), {
+    status: "rolled-back-manual",
+    to: "1.2.3",
+  });
+  assert.deepEqual(events, ["prepare", "router-rollback", "router-rollback"]);
+  assert.equal(docker.calls.rollback, 1);
 });
 
 test("rollback failure is catastrophic", async () => {
@@ -248,6 +438,22 @@ test("finalize failure is wrapped with finalize phase", async () => {
   );
 });
 
+test("manual rollback remains available after finalize failure", async () => {
+  const { pilot, docker } = makePilot({
+    docker: makeFakeDocker({ finalizeFails: true }),
+  });
+
+  await assert.rejects(pilot.runUpdate(), DockerError);
+  assert.equal(pilot.getStatus().lastResult, null);
+  await assert.rejects(pilot.runUpdate(), RollbackError);
+  assert.equal(docker.calls.deploy, 1);
+  assert.deepEqual(await pilot.rollback(), {
+    status: "rolled-back-manual",
+    to: "1.2.3",
+  });
+  assert.equal(docker.calls.rollback, 1);
+});
+
 test("parallel update call is rejected as already in progress", async () => {
   let release = /** @type {any} */ (() => {});
   const waiting = new Promise((resolve) => {
@@ -297,6 +503,7 @@ test("lifecycle hooks fire in order on the happy path", async () => {
     githubAdapter: makeFakeGitHub(),
     dockerAdapter: makeFakeDocker(),
     healthAdapter: makeFakeHealth(),
+    trafficRouter: makeFakeTrafficRouter(),
     hookBus: observingBus(order),
   }).runUpdate();
   assert.deepEqual(order, [
@@ -321,6 +528,7 @@ test("rollback hooks fire on health failure", async () => {
     githubAdapter: makeFakeGitHub(),
     dockerAdapter: makeFakeDocker(),
     healthAdapter: makeFakeHealth({ healthy: false }),
+    trafficRouter: makeFakeTrafficRouter(),
     hookBus: observingBus(order),
   }).runUpdate();
   assert.ok(order.includes(HOOKS.BEFORE_ROLLBACK));
@@ -340,6 +548,7 @@ test("ON_ERROR fires on deploy failure", async () => {
       githubAdapter: makeFakeGitHub(),
       dockerAdapter: makeFakeDocker({ deployFails: true }),
       healthAdapter: makeFakeHealth(),
+      trafficRouter: makeFakeTrafficRouter(),
       hookBus: observingBus(order),
     }).runUpdate(),
   );
@@ -364,6 +573,32 @@ test("getStatus reports the idle engine state", () => {
   assert.equal(status.lastResult, null);
   assert.equal(status.repo, "org/app");
   assert.ok(Number.isFinite(Date.parse(status.uptime.engineSince)));
+});
+
+test("engine preserves the resolved logger instance and its settings", () => {
+  const writes = [];
+  const stream = { write: (chunk) => writes.push(chunk) };
+  const { pilot } = makePilot({
+    config: {
+      logger: {
+        level: "debug",
+        prefix: "[engine-test]",
+        pretty: false,
+        stream,
+        redact: ["token"],
+      },
+    },
+  });
+
+  assert.equal(pilot.logger, pilot.config.logger);
+  pilot.logger.debug("logger wired", { token: "secret" });
+
+  assert.equal(writes.length, 1);
+  const entry = JSON.parse(writes[0]);
+  assert.equal(entry.level, "debug");
+  assert.equal(entry.prefix, "[engine-test]");
+  assert.equal(entry.message, "logger wired");
+  assert.equal(entry.token, "***");
 });
 
 test("getStatus reports running during an in-flight check", async () => {
@@ -395,8 +630,58 @@ test("manual rollback requires a prior successful update", async () => {
 });
 
 test("manual rollback succeeds after an update", async () => {
-  const { pilot, docker } = makePilot();
+  const events = [];
+  const docker = makeFakeDocker();
+  const dockerRollback = docker.rollback;
+  docker.restorePrevious = async () => {
+    events.push("restore-previous");
+    return { restoredContainerId: "prev-id" };
+  };
+  docker.rollback = async () => {
+    events.push("docker-rollback");
+    return dockerRollback();
+  };
+  const { pilot } = makePilot({
+    docker,
+    trafficRouter: makeFakeTrafficRouter(events),
+  });
   await pilot.runUpdate();
+  assert.deepEqual(await pilot.rollback(), {
+    status: "rolled-back-manual",
+    to: "1.2.3",
+  });
+  assert.equal(docker.calls.rollback, 1);
+  assert.deepEqual(events, [
+    "prepare",
+    "switch",
+    "restore-previous",
+    "router-rollback",
+    "docker-rollback",
+  ]);
+});
+
+test("manual rollback does not remove a candidate without a previous container", async () => {
+  const { pilot, docker } = makePilot({
+    docker: makeFakeDocker({ previousContainerId: null }),
+  });
+  await pilot.runUpdate();
+
+  await assert.rejects(pilot.rollback(), RollbackError);
+  assert.equal(docker.calls.rollback, 0);
+});
+
+test("manual rollback remains available after a later no-op check", async () => {
+  let checks = 0;
+  const github = {
+    check: async () => {
+      checks += 1;
+      return makeFakeGitHub({ updateAvailable: checks === 1 }).check();
+    },
+  };
+  const { pilot, docker } = makePilot({ github });
+
+  assert.equal((await pilot.runUpdate()).status, "updated");
+  assert.equal((await pilot.runUpdate()).status, "up-to-date");
   assert.deepEqual(await pilot.rollback(), {
     status: "rolled-back-manual",
     to: "1.2.3",
@@ -404,6 +689,63 @@ test("manual rollback succeeds after an update", async () => {
   assert.equal(docker.calls.rollback, 1);
 });
 
+test("manual rollback rejects a success-shaped result without a restored ID", async () => {
+  const docker = makeFakeDocker();
+  let rollbackCalls = 0;
+  docker.rollback = /** @type {typeof docker.rollback} */ (
+    async () => {
+      rollbackCalls += 1;
+      return {
+        rolledBack: true,
+        restoredContainerId: rollbackCalls === 1 ? null : "prev-id",
+      };
+    }
+  );
+  const { pilot } = makePilot({ docker });
+
+  await pilot.runUpdate();
+  await assert.rejects(pilot.rollback(), RollbackError);
+  assert.deepEqual(await pilot.rollback(), {
+    status: "rolled-back-manual",
+    to: "1.2.3",
+  });
+});
+
+test("successful manual rollback consumes rollback eligibility", async () => {
+  const { pilot, docker } = makePilot();
+  await pilot.runUpdate();
+  await pilot.rollback();
+
+  await assert.rejects(pilot.rollback(), RollbackError);
+  assert.equal(docker.calls.rollback, 1);
+});
+
 test("constructor rejects invalid user configuration", () => {
   assert.throws(() => new UpdatePilot({ repo: "bad" }), ConfigError);
+});
+
+test("engine passes rollback image retention to the Docker adapter", () => {
+  const pilot = new UpdatePilot(
+    {
+      repo: "org/app",
+      currentVersion: "1.2.3",
+      docker: { image: "ghcr.io/org/app" },
+      health: {
+        url: "http://x/health",
+        headers: { authorization: "Bearer test-token" },
+      },
+      rollback: { keepImages: 5 },
+    },
+    {
+      githubAdapter: makeFakeGitHub(),
+      trafficRouter: makeFakeTrafficRouter(),
+    },
+  );
+
+  pilot._ensureAdapters({ github: false });
+
+  assert.equal(pilot._docker.keepImages, 5);
+  assert.deepEqual(pilot._health.headers, {
+    authorization: "Bearer test-token",
+  });
 });

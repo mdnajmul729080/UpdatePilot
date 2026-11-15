@@ -1,9 +1,8 @@
-// SECURITY: This demo has NO authentication.
-// In production, add authentication middleware (e.g., express-basic-auth,
-// session-based auth, or an SSO provider) BEFORE deploying this to a
-// public server. See the "Production Security" section of the README.
+// SECURITY: This demo binds to loopback but has NO authentication.
+// Add authentication and authorization before exposing it beyond localhost.
 import express from "express";
-import { fileURLToPath } from "node:url";
+import { resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   ConfigError,
   RollbackError,
@@ -13,15 +12,63 @@ import {
   isUpdatePilotError,
 } from "../../src/index.js";
 
+const demoMode = process.env.UPDATE_PILOT_DEMO !== "0";
+
+function validateRealModeSettings() {
+  if (process.env.COMPOSE_FILE)
+    throw new Error(
+      "Real mode does not support COMPOSE_FILE; Compose deployments are disabled",
+    );
+  const required = [
+    "GITHUB_REPOSITORY",
+    "APP_VERSION",
+    "DOCKER_IMAGE",
+    "HEALTH_URL",
+    "TRAFFIC_ROUTER_MODULE",
+  ];
+  const missing = required.filter((name) => !process.env[name]?.trim());
+  if (missing.length)
+    throw new Error(`Real mode requires: ${missing.join(", ")}`);
+}
+
+async function loadTrafficRouter() {
+  if (demoMode) return undefined;
+  const modulePath = process.env.TRAFFIC_ROUTER_MODULE;
+  if (!modulePath) throw new Error("TRAFFIC_ROUTER_MODULE is required");
+  let loaded;
+  try {
+    loaded = await import(
+      pathToFileURL(resolve(process.cwd(), modulePath)).href
+    );
+  } catch (error) {
+    throw new Error(`Could not load traffic router module: ${modulePath}`, {
+      cause: error,
+    });
+  }
+  const trafficRouter = loaded.default ?? loaded.trafficRouter;
+  if (
+    !trafficRouter ||
+    typeof trafficRouter.prepare !== "function" ||
+    typeof trafficRouter.switch !== "function" ||
+    typeof trafficRouter.rollback !== "function"
+  )
+    throw new Error(
+      "TRAFFIC_ROUTER_MODULE must export a router with prepare(), switch(), and rollback()",
+    );
+  return trafficRouter;
+}
+
+if (!demoMode) validateRealModeSettings();
+
+const currentVersion = process.env.APP_VERSION ?? "1.0.0";
 const userConfig = {
-  repo: "nodejs/node",
-  currentVersion: process.env.APP_VERSION ?? "1.0.0",
+  repo: process.env.GITHUB_REPOSITORY ?? "your-org/your-app",
+  currentVersion,
   github: { token: process.env.GITHUB_TOKEN },
   docker: {
-    image: process.env.DOCKER_IMAGE ?? "node:20-alpine",
-    tag: "latest",
+    image: process.env.DOCKER_IMAGE ?? "ghcr.io/your-org/your-app",
+    tag: currentVersion,
     containerName: "update-pilot-demo",
-    composeFile: process.env.COMPOSE_FILE,
   },
   health: {
     url: process.env.HEALTH_URL ?? "http://127.0.0.1:3000/health",
@@ -34,7 +81,6 @@ const userConfig = {
 };
 const config = defineConfig(userConfig);
 
-const demoMode = process.env.UPDATE_PILOT_DEMO !== "0";
 const demoAdapters = demoMode
   ? {
       githubAdapter: {
@@ -44,7 +90,7 @@ const demoAdapters = demoMode
           currentVersionRaw: config.currentVersionRaw,
           latestVersion: "1.0.1",
           latestVersionRaw: "v1.0.1",
-          releaseUrl: "https://github.com/nodejs/node/releases",
+          releaseUrl: "https://github.com/your-org/your-app/releases",
           releaseNotes: "Demo release notes. No real deployment is performed.",
           publishedAt: new Date().toISOString(),
           isPrerelease: false,
@@ -77,7 +123,11 @@ const demoAdapters = demoMode
     }
   : {};
 
-const engine = new UpdatePilot(userConfig, demoAdapters);
+const trafficRouter = await loadTrafficRouter();
+const engine = new UpdatePilot(userConfig, {
+  ...demoAdapters,
+  ...(trafficRouter ? { trafficRouter } : {}),
+});
 const app = express();
 app.disable("x-powered-by");
 app.get("/health", (_request, response) => response.sendStatus(200));
@@ -140,10 +190,12 @@ app.post("/api/rollback", async (_request, response) => {
 });
 
 const port = Number(process.env.PORT ?? 3000);
-const server = app.listen(port, () => {
+const server = app.listen(port, "127.0.0.1", () => {
   const address = server.address();
   const actualPort =
     typeof address === "object" && address ? address.port : port;
+  const actualHost =
+    typeof address === "object" && address ? address.address : "127.0.0.1";
   if (demoMode) {
     console.log(
       "[update-pilot-example] Running in DEMO MODE (fake adapters). Set UPDATE_PILOT_DEMO=0 to use real Docker/GitHub/HTTP.",
@@ -154,7 +206,7 @@ const server = app.listen(port, () => {
     );
   }
   console.log(
-    `[update-pilot-example] Listening on http://127.0.0.1:${actualPort}`,
+    `[update-pilot-example] Listening on http://${actualHost}:${actualPort}`,
   );
 });
 

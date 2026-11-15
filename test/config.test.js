@@ -133,6 +133,37 @@ test("requires an HTTP or HTTPS health URL", () => {
   }
 });
 
+test("supports and freezes copied health headers", () => {
+  const headers = { authorization: "Bearer token", "x-empty": "" };
+  const config = defineConfig(
+    minimalConfig({
+      health: { url: "http://localhost/health", headers },
+    }),
+  );
+
+  assert.deepEqual(config.health.headers, headers);
+  assert.notEqual(config.health.headers, headers);
+  assert.equal(Object.isFrozen(config.health.headers), true);
+  assert.equal(Object.isFrozen(headers), false);
+});
+
+test("health interval is an integer from zero through 60000 milliseconds", () => {
+  for (const interval of [-1, 60_001, 1.5])
+    expectConfigError(
+      minimalConfig({ health: { url: "http://localhost/health", interval } }),
+      "health.interval",
+    );
+
+  assert.equal(
+    defineConfig(
+      minimalConfig({
+        health: { url: "http://localhost/health", interval: 60_000 },
+      }),
+    ).health.interval,
+    60_000,
+  );
+});
+
 test("requires health retries to be an integer from 1 through 30", () => {
   for (const retries of [0, 31, 1.5]) {
     expectConfigError(

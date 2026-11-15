@@ -62,6 +62,7 @@ declare module "update-pilot" {
     timeout: number;
     interval: number;
     expectStatus: number;
+    headers: Record<string, string>;
   }
 
   export interface RollbackConfig {
@@ -218,10 +219,41 @@ declare module "update-pilot" {
     latencyMs: number;
     checkedAt: string;
   }
+  export interface TrafficRouterDeployment {
+    from: string;
+    to: string | null;
+    healthUrl: string;
+    previousContainerId: string | null;
+    newContainerId: string | null;
+    candidatePorts: Record<string, Array<{ HostIp: string; HostPort: string }>>;
+  }
+  export interface TrafficRouterPreparation {
+    healthUrl: string;
+    context?: unknown;
+  }
+  export interface TrafficRouter {
+    prepare(
+      deployment: TrafficRouterDeployment,
+    ): Promise<TrafficRouterPreparation>;
+    switch(
+      deployment: TrafficRouterDeployment,
+      context?: unknown,
+    ): Promise<void>;
+    rollback(
+      deployment: TrafficRouterDeployment,
+      context?: unknown,
+      reason?: string,
+    ): Promise<void>;
+  }
   export interface DockerDeployResult {
     success: true;
     newContainerId: string | null;
     previousContainerId: string | null;
+    healthUrl?: string;
+    candidatePorts?: Record<
+      string,
+      Array<{ HostIp: string; HostPort: string }>
+    >;
   }
   export interface DockerFinalizeResult {
     finalized: true;
@@ -272,7 +304,8 @@ declare module "update-pilot" {
   }
   export function isUpdatePilotError(error: unknown): error is UpdatePilotError;
 
-  export interface HookBus {
+  export class HookBus {
+    constructor();
     on(event: string, handler: HookHandler): this;
     off(event: string, handler: HookHandler): this;
     once(event: string, handler: HookHandler): this;
@@ -342,8 +375,10 @@ declare module "update-pilot" {
   }
   export interface UpdatePilotDependencies {
     githubAdapter?: Pick<GitHubAdapter, "check">;
-    dockerAdapter?: Pick<DockerAdapter, "deploy" | "finalize" | "rollback">;
+    dockerAdapter?: Pick<DockerAdapter, "deploy" | "finalize" | "rollback"> &
+      Partial<Pick<DockerAdapter, "restorePrevious">>;
     healthAdapter?: Pick<HealthAdapter, "check">;
+    trafficRouter?: TrafficRouter;
     logger?: Logger;
     hookBus?: HookBus;
   }
@@ -381,18 +416,37 @@ declare module "update-pilot" {
     } | null>;
     deploy(newTag?: string): Promise<DockerDeployResult>;
     finalize(): Promise<DockerFinalizeResult>;
+    restorePrevious(): Promise<{ restoredContainerId: string | null }>;
     rollback(originalError?: Error): Promise<DockerRollbackResult>;
   }
   export class HealthAdapter {
     constructor(options: HealthAdapterOptions);
-    check(options?: { signal?: AbortSignal }): Promise<HealthResult>;
-    checkOnce(options?: { signal?: AbortSignal }): Promise<HealthResult>;
-    waitUntilHealthy(options?: { signal?: AbortSignal }): Promise<HealthResult>;
+    check(options?: {
+      signal?: AbortSignal;
+      url?: string;
+    }): Promise<HealthResult>;
+    checkOnce(options?: {
+      signal?: AbortSignal;
+      url?: string;
+    }): Promise<HealthResult>;
+    waitUntilHealthy(options?: {
+      signal?: AbortSignal;
+      url?: string;
+    }): Promise<HealthResult>;
   }
   export function createLogger(options?: LoggerConfig): Logger;
   export const silentLogger: Logger;
   export const VERSION: "0.0.1";
+}
 
-  const UpdatePilotDefault: typeof UpdatePilot;
-  export default UpdatePilotDefault;
+declare module "update-pilot/adapters/docker" {
+  export { DockerAdapter } from "update-pilot";
+}
+
+declare module "update-pilot/adapters/github" {
+  export { GitHubAdapter } from "update-pilot";
+}
+
+declare module "update-pilot/adapters/health" {
+  export { HealthAdapter } from "update-pilot";
 }

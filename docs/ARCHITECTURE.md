@@ -15,11 +15,11 @@ application retains control of authentication, routing, and the surrounding
 user experience; the library coordinates the configured release and
 deployment operations.
 
-The default deployment philosophy is **zero-downtime by default**. The old
-container remains available while the new version is started and checked.
-Only after the health check succeeds should traffic switch to the new
-version; a failed check triggers a rollback. This lifecycle is the intended
-contract for the Docker MVP.
+The non-Compose Docker adapter can prepare a candidate while retaining the
+previous container. Candidate-only health checks and traffic switching require
+an application-provided `trafficRouter`; no router backend is bundled, and
+zero-downtime behavior is not guaranteed by the package. Compose deployment is
+currently rejected before Docker side effects.
 
 ## System Diagram
 
@@ -33,6 +33,8 @@ flowchart LR
     DockerAdapter --> DockerEngine[Docker Engine]
     Engine --> HealthAdapter[Health Adapter]
     HealthAdapter --> HealthEndpoint[App /health endpoint]
+    Engine --> TrafficRouter[Injected traffic router]
+    TrafficRouter --> HealthAdapter
     Engine --> HookBus[HookBus]
     HookBus --> Callbacks[User callbacks]
 ```
@@ -43,14 +45,14 @@ the hook bus so application-owned callbacks can observe the process.
 
 ## Core Modules
 
-| Module          | File                     | Responsibility                             |
-| --------------- | ------------------------ | ------------------------------------------ |
-| `UpdatePilot`   | `src/core/engine.js`     | Orchestrates the full update flow.         |
-| `defineConfig`  | `src/core/config.js`     | Validates user configuration.              |
-| `HookBus`       | `src/core/events.js`     | Emits lifecycle events.                    |
-| `GitHubAdapter` | `src/adapters/github.js` | Wraps `gh-release-update-notifier`.        |
-| `DockerAdapter` | `src/adapters/docker.js` | Wraps `dockerode` and `dockerode-compose`. |
-| `HealthAdapter` | `src/adapters/health.js` | Runs HTTP health checks with retry.        |
+| Module          | File                     | Responsibility                                                      |
+| --------------- | ------------------------ | ------------------------------------------------------------------- |
+| `UpdatePilot`   | `src/core/engine.js`     | Orchestrates the full update flow.                                  |
+| `defineConfig`  | `src/core/config.js`     | Validates user configuration.                                       |
+| `HookBus`       | `src/core/events.js`     | Emits lifecycle events.                                             |
+| `GitHubAdapter` | `src/adapters/github.js` | Wraps `gh-release-update-notifier`.                                 |
+| `DockerAdapter` | `src/adapters/docker.js` | Wraps `dockerode` for non-Compose deployment; rejects Compose mode. |
+| `HealthAdapter` | `src/adapters/health.js` | Runs HTTP health checks with retry.                                 |
 
 ### Engine
 
@@ -84,14 +86,15 @@ to rollback rather than a successful update response.
    deployment is not needed.
 3. **Emit `beforeDeploy`** — The engine notifies the configured lifecycle
    callback before changing the running deployment.
-4. **`deploy()`** — The Docker adapter pulls the release image and restarts
-   the container through Compose while keeping the old container alive.
-5. **`verify()`** — The health adapter requests the configured `/health`
-   endpoint using the configured retries and per-attempt timeout.
-6. **Complete a healthy update** — On success, emit `afterDeploy`, stop the
-   old container, and return a successful update result.
-7. **`rollback()`** — If verification fails, restore the old container using
-   the retained image cache.
+4. **`deploy()`** — The non-Compose Docker adapter pulls the release image
+   and starts a candidate on a dynamic host port while retaining the old
+   container.
+5. **`verify()`** — The injected router prepares a candidate-only health URL;
+   the health adapter requests that URL using the configured retry policy.
+6. **Switch and finalize** — After candidate health succeeds, the engine asks
+   the injected router to switch traffic, then finalizes the Docker deployment.
+7. **`rollback()`** — If preparation, health, or switching fails, the engine
+   asks the provider to restore routing and rolls back the Docker candidate.
 8. **Report rollback** — Emit `afterRollback` and return a failure result so
    the caller can report the unsuccessful update.
 
@@ -140,8 +143,8 @@ export class UpdateAdapter {
 }
 ```
 
-The contract separates the operation's intent from provider mechanics. A
-Docker adapter can use Compose, while a future adapter can translate the
+The contract separates the operation's intent from provider mechanics. The
+current Docker adapter rejects Compose; future adapters can translate the
 same operations to another runtime. Implementations should make failed
 operations visible to the engine rather than silently treating them as
 successful.

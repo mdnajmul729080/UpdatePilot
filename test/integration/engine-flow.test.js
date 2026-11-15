@@ -41,6 +41,7 @@ function makeEngine({
     },
   };
   const dockerCalls = { deploy: 0, finalize: 0, rollback: 0 };
+  const trafficRouterCalls = [];
   const docker = {
     calls: dockerCalls,
     deploy: async () => {
@@ -63,15 +64,31 @@ function makeEngine({
       return { rolledBack: true, restoredContainerId: "old-1" };
     },
   };
+  const trafficRouter = {
+    prepare: async () => {
+      trafficRouterCalls.push("prepare");
+      return {
+        healthUrl: "http://candidate.test/health",
+        context: { candidate: "new-1" },
+      };
+    },
+    switch: async () => {
+      trafficRouterCalls.push("switch");
+    },
+    rollback: async () => {
+      trafficRouterCalls.push("rollback");
+    },
+  };
   const health = {
-    check: async () => {
+    /** @param {{ url?: string }} [options] */
+    check: async ({ url } = {}) => {
       if (!healthy)
         throw new HealthCheckError("probe failed", {
           context: { lastStatus: 500 },
         });
       return {
         healthy: true,
-        url: "http://example.test/health",
+        url: url ?? "http://example.test/health",
         status: 200,
         attempts: 1,
         latencyMs: 6,
@@ -93,10 +110,11 @@ function makeEngine({
       githubAdapter: github,
       dockerAdapter: docker,
       healthAdapter: health,
+      trafficRouter,
       hookBus,
     },
   );
-  return { pilot, github, docker, health, hookBus };
+  return { pilot, github, docker, health, hookBus, trafficRouterCalls };
 }
 
 test("happy flow fires hooks, records status, then reports up-to-date", async () => {
@@ -104,7 +122,7 @@ test("happy flow fires hooks, records status, then reports up-to-date", async ()
   const hooks = Object.fromEntries(
     Object.values(HOOKS).map((event) => [event, () => fired.push(event)]),
   );
-  const { pilot } = makeEngine({ hooks });
+  const { pilot, docker, trafficRouterCalls } = makeEngine({ hooks });
   const result = await pilot.runUpdate();
   assert.equal(result.status, "updated");
   assert.equal(result.from, "1.2.3");
@@ -119,11 +137,18 @@ test("happy flow fires hooks, records status, then reports up-to-date", async ()
     HOOKS.AFTER_VERIFY,
   ]);
   assert.equal((await pilot.runUpdate()).status, "up-to-date");
+  assert.deepEqual(trafficRouterCalls, ["prepare", "switch"]);
+  assert.deepEqual(await pilot.rollback(), {
+    status: "rolled-back-manual",
+    to: "1.2.3",
+  });
+  assert.equal(docker.calls.rollback, 1);
+  assert.deepEqual(trafficRouterCalls, ["prepare", "switch", "rollback"]);
 });
 
 test("health failure rolls back without finalizing and emits afterRollback", async () => {
   const fired = [];
-  const { pilot, docker } = makeEngine({
+  const { pilot, docker, trafficRouterCalls } = makeEngine({
     healthy: false,
     hooks: { [HOOKS.AFTER_ROLLBACK]: () => fired.push("rolled back") },
   });
@@ -132,6 +157,7 @@ test("health failure rolls back without finalizing and emits afterRollback", asy
   assert.equal(result.reason, "health-check-failed");
   assert.equal(docker.calls.rollback, 1);
   assert.equal(docker.calls.finalize, 0);
+  assert.deepEqual(trafficRouterCalls, ["prepare", "rollback"]);
   assert.deepEqual(fired, ["rolled back"]);
 });
 

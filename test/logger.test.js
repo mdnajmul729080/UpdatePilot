@@ -24,6 +24,19 @@ test("level filtering hides messages below the configured level", () => {
   assert.equal(captured.read().includes("visible"), true);
 });
 
+test("silent level suppresses all logger output including child loggers", () => {
+  const captured = captureStream();
+  const logger = createLogger({ level: "silent", stream: captured.stream });
+
+  logger.error("error");
+  logger.warn("warning");
+  logger.info("info");
+  logger.debug("debug");
+  logger.child({ requestId: "abc" }).error("child error");
+
+  assert.equal(captured.read(), "");
+});
+
 test("JSON mode emits valid JSON lines with structured fields", () => {
   const captured = captureStream();
   const logger = createLogger({

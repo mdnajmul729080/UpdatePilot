@@ -126,6 +126,20 @@ test("check includes prereleases when enabled", async () => {
   assert.equal(result.isPrerelease, true);
 });
 
+test("check preserves SHA release tags as the selected deployment identity", async () => {
+  const tag = "abcdef1234567";
+  const adapter = new GitHubAdapter(
+    adapterOptions(async () => fakeResponse([release(tag)]), {
+      currentVersion: "0123456789abcde",
+    }),
+  );
+  const result = await adapter.check();
+
+  assert.equal(result.updateAvailable, true);
+  assert.equal(result.latestVersion, tag);
+  assert.equal(result.latestVersionRaw, tag);
+});
+
 test("check parses rate limit headers", async () => {
   const fetchImpl = async () =>
     fakeResponse([release("v1.3.0")], {

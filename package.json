@@ -24,12 +24,14 @@
     "CHANGELOG.md"
   ],
   "engines": {
-    "node": ">=20"
+    "node": "^20.19.0 || >=22.12.0"
   },
   "scripts": {
     "test": "node --test",
+    "test:package": "node scripts/package-smoke.js",
+    "test:types": "npx --yes --package typescript@5.9.3 -- tsc --noEmit --strict --module NodeNext --moduleResolution NodeNext --target ES2022 type-tests/public-api.ts",
     "lint": "eslint .",
-    "prepublishOnly": "npm test"
+    "prepublishOnly": "npm test && npm run test:types && npm run test:package"
   },
   "keywords": [
     "self-hosted",

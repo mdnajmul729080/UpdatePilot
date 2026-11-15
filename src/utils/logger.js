@@ -79,7 +79,8 @@ export function createLogger(options = {}) {
   function buildLogger(bindings) {
     /** @param {'error' | 'warn' | 'info' | 'debug'} level @param {string} message @param {LogMeta} [meta] */
     function write(level, message, meta = {}) {
-      if (LEVELS[level] > LEVELS[config.level]) return;
+      if (config.level === "silent" || LEVELS[level] > LEVELS[config.level])
+        return;
       const cleanMeta = /** @type {LogMeta} */ (
         redact({ ...bindings, ...meta }, config.redact)
       );
