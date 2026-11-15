@@ -85,7 +85,12 @@ test(
   async () => {
     const child = spawn(process.execPath, [serverFile], {
       cwd: dirname(serverFile),
-      env: { ...process.env, PORT: "0", UPDATE_PILOT_DEMO: "1" },
+      env: {
+        ...process.env,
+        PORT: "0",
+        UPDATE_PILOT_DEMO: "1",
+        GITHUB_REPOSITORY: "your-org/your-app",
+      },
       stdio: ["ignore", "pipe", "pipe"],
     });
     children.push(child);
