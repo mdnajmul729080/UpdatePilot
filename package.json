@@ -15,10 +15,16 @@
       "types": "./src/types/index.d.ts",
       "import": "./src/adapters/*.js",
       "require": "./src/adapters/*.js"
+    },
+    "./testing/traffic-router-contract": {
+      "types": "./src/types/index.d.ts",
+      "import": "./testing/traffic-router-contract.js",
+      "require": "./testing/traffic-router-contract.js"
     }
   },
   "files": [
     "src",
+    "testing",
     "README.md",
     "LICENSE",
     "CHANGELOG.md"

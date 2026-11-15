@@ -149,6 +149,21 @@ same operations to another runtime. Implementations should make failed
 operations visible to the engine rather than silently treating them as
 successful.
 
+## Router Provider Conformance
+
+Provider packages can import `defineTrafficRouterContractTests` from
+`update-pilot/testing/traffic-router-contract` and supply a fresh, isolated
+scenario for each test. The scenario provides the router and deployment data,
+checks that the health URL reaches only the candidate, verifies old-route
+preservation and candidate switching, confirms rollback and preparation
+cleanup, and releases its test resources in `cleanup()`.
+
+These tests standardize observable behavior without binding the engine to a
+proxy or control plane. They do not install a router, emulate production
+credentials, or certify an application's topology; each provider project must
+run them against its own isolated integration environment. UpdatePilot does
+not currently bundle any router provider.
+
 ## Safety Principles
 
 - **Retain the old image until verification passes.** Do not remove the

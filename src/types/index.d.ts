@@ -450,3 +450,35 @@ declare module "update-pilot/adapters/github" {
 declare module "update-pilot/adapters/health" {
   export { HealthAdapter } from "update-pilot";
 }
+
+declare module "update-pilot/testing/traffic-router-contract" {
+  import type {
+    TrafficRouter,
+    TrafficRouterDeployment,
+    TrafficRouterPreparation,
+  } from "update-pilot";
+
+  export interface TrafficRouterContractScenario {
+    trafficRouter: TrafficRouter;
+    deployment: TrafficRouterDeployment;
+    verifyCandidateHealth(
+      preparation: TrafficRouterPreparation,
+      deployment: TrafficRouterDeployment,
+    ): void | Promise<void>;
+    assertOldRouteActive(): void | Promise<void>;
+    assertCandidateRouteActive(): void | Promise<void>;
+    assertPreparationCleaned(): void | Promise<void>;
+    cleanup(): void | Promise<void>;
+  }
+
+  export interface TrafficRouterContractTestOptions {
+    providerName: string;
+    createScenario():
+      | TrafficRouterContractScenario
+      | Promise<TrafficRouterContractScenario>;
+  }
+
+  export function defineTrafficRouterContractTests(
+    options: TrafficRouterContractTestOptions,
+  ): void;
+}

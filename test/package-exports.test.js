@@ -35,3 +35,15 @@ test("adapter subpaths are available through ESM and require", async () => {
   assert.equal(typeof esmHealth.HealthAdapter, "function");
   assert.equal(typeof commonjsHealth.HealthAdapter, "function");
 });
+
+test("TrafficRouter conformance helper is available through ESM and require", async () => {
+  const helperPath = "update-pilot/testing/traffic-router-contract";
+  const esmHelper = await import(helperPath);
+  const commonjsHelper = require(helperPath);
+
+  assert.equal(typeof esmHelper.defineTrafficRouterContractTests, "function");
+  assert.equal(
+    typeof commonjsHelper.defineTrafficRouterContractTests,
+    "function",
+  );
+});

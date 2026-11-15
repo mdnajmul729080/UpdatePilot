@@ -231,6 +231,42 @@ valid provider. A custom Docker adapter may own the handoff itself. No
 Traefik, Caddy, Nginx, or other built-in provider is included; the application
 must supply an implementation that matches its actual routing environment.
 
+### Test a Custom Provider
+
+Provider packages can reuse the Node.js contract suite from
+`update-pilot/testing/traffic-router-contract`:
+
+```js
+import assert from "node:assert/strict";
+import { defineTrafficRouterContractTests } from "update-pilot/testing/traffic-router-contract";
+
+defineTrafficRouterContractTests({
+  providerName: "my-router",
+  async createScenario() {
+    const environment = await startIsolatedRouterEnvironment();
+    return {
+      trafficRouter: environment.trafficRouter,
+      deployment: environment.deployment,
+      async verifyCandidateHealth(preparation) {
+        const response = await fetch(preparation.healthUrl);
+        assert.equal(response.status, 200);
+        await environment.assertCandidateOnly(preparation.healthUrl);
+      },
+      assertOldRouteActive: () => environment.assertOldRouteActive(),
+      assertCandidateRouteActive: () =>
+        environment.assertCandidateRouteActive(),
+      assertPreparationCleaned: () => environment.assertPreparationCleaned(),
+      cleanup: () => environment.close(),
+    };
+  },
+});
+```
+
+The provider supplies isolated infrastructure and assertions that inspect its
+actual route state. The suite checks candidate-only health, preservation of the
+old route until switching, rollback, and cleanup. It does not install a
+provider or certify the application's production topology.
+
 Docker Compose deployments do not yet implement this candidate/router
 contract and are not production-ready; Compose behavior remains a separate
 roadmap phase.
