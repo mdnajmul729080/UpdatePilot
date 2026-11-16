@@ -78,6 +78,24 @@ At Phase-01 close, Phase 02 was the next approval-gated phase. The approval was 
 
 Universal Compatibility Phase 03 verifies provider authoring, package exports/types, and generic CI usage without a vendor-specific matrix. Exact scope and acceptance are in `IMPLEMENTATION_ROADMAP.md`; wait for its approval prompt.
 
+## 2026-11-15 — npm Release Readiness
+
+### Plan and Scope
+
+- Prepare the current `update-pilot@0.0.1` package for a first npm install without publishing it.
+- Allowed scope: `package.json`, `package-lock.json`, README, CONTRIBUTING, LICENSE, CHANGELOG, and private release notes. Do not change runtime, tests, dependencies, UI, CI/release workflows, Git tags, or registry state.
+- Keep generic `YOUR_ORG/YOUR_APP` values only in consumer setup examples. Use the actual GitHub repository identity for project links and metadata.
+
+### Changes and Verification
+
+- Replaced package repository/bugs/homepage and public README/CONTRIBUTING links with `mdnajmul729080/UpdatePilot`; replaced the author/license placeholders with the repository owner handle.
+- Marked the current package contents as the initial `0.0.1` changelog release and corrected the README compressed-size figure to 36 KB.
+- Regenerated only root `package-lock.json` metadata; its Node engine range now matches `package.json` (`^20.19.0 || >=22.12.0`). No dependency versions changed.
+- `npm run prepublishOnly` passed: 164 tests, 1 opt-in Docker skip, 0 failures/cancellations; types and fresh consumer tarball smoke passed. Lint and diff checks passed; no new diagnostics.
+- `npm publish --dry-run --ignore-scripts --access public` succeeded: npm reports `update-pilot@0.0.1`, 17 files, 36.7 KB compressed. It emitted a not-logged-in warning, expected for dry-run; no package was published.
+- `npm view update-pilot` returned 404 before preparation. This is not a guarantee of package-name availability or publish permissions. Actual publish remains gated on a logged-in npm account or the release workflow's `NPM_TOKEN` secret and a version tag.
+- No dependency, runtime, UI, CI workflow, or release automation changes; no commit/tag/push performed for this preparation task.
+
 ## 2026-11-15 — Universal Compatibility Phase 03
 
 ### Plan and Scope
@@ -92,7 +110,9 @@ Universal Compatibility Phase 03 verifies provider authoring, package exports/ty
 - README now directs provider authors to register the suite in a test file and run it using `node --test` or their project test command.
 - Added `AGENTS.md` rules limiting each phase to one focused check and one final acceptance gate, avoiding repeated passes/loops, and rerunning only a failed check after an in-scope fix.
 - `npm run prepublishOnly`: 164 passed, 1 opt-in Docker test skipped, 0 failed/cancelled; workspace types, installed-tarball type compilation, ESM/CommonJS smoke passed (17 files, 36 KB). Lint, diagnostics, and diff check passed. Dependency audit was not repeated because dependencies did not change.
-- Scope audit: only `scripts/package-smoke.js`, `README.md`, `AGENTS.md`, and private notes changed for Phase 03. No CI workflow change was needed because its existing package matrix runs `npm run test:package`.
+- Scope audit: Phase-03 changes were limited to `scripts/package-smoke.js`, `README.md`, `AGENTS.md`, and private notes. No CI workflow change was needed because its existing package matrix runs `npm run test:package`.
+- User-authorized project commit `511c0d882342c9ce778b4e55e335f598b678b9ad` was pushed to `origin/main`; `.gitignore` and private notes were excluded.
+- GitHub Actions CI run `43786989299` passed all 8 jobs: full test suite on Node 20.19/22.12/26.12, package compatibility on the same matrix, example smoke, and Docker candidate/cleanup. The separate CodeQL run was still in progress at the one-time status lookup.
 
 ### Next
 

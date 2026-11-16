@@ -8,6 +8,7 @@
 - Universal Compatibility Phase 01: complete; injected-router health targets and lifecycle/error semantics are specified and enforced.
 - Universal Compatibility Phase 02: complete locally; provider failure conformance suite expanded, no vendor selected.
 - Universal Compatibility Phase 03: complete; the installed tarball's TypeScript provider scenario compiles, provider invocation is documented, and `AGENTS.md` contains the requested verification budget.
+- npm Release Readiness: complete locally; package metadata/links and lockfile are aligned, full publish gate and npm dry-run passed. No actual publication attempted; registry account/name confirmation remains external.
 - No mandatory implementation phase remains for provider-neutral router compatibility on Docker candidates. Phase 04 first-party integration is optional and target-dependent.
 - Optional provider-specific integration and non-Docker deployment support are separate and unapproved.
 
@@ -34,6 +35,7 @@
 - Workspace types, fresh-tarball TypeScript provider scenario, and ESM/CommonJS package smoke passed; 17 files, 36 KB compressed.
 - `npm run lint` passed; touched-file diagnostics are clean; `git diff --check` found no whitespace errors. Dependency audit was not repeated because Phase 03 changed no dependencies.
 - Remote run `43778214559` passed for commit `e773671` across Node 20.19/22.12/26.12, package compatibility, example, lint, types, audit, and Docker candidate lifecycle. It predates the local Phase-01/02 changes and does not verify them remotely.
+- User-authorized commit `511c0d882342c9ce778b4e55e335f598b678b9ad` was pushed to `origin/main`. GitHub Actions CI run `43786989299` completed successfully: all 8 jobs passed, including Node 20.19/22.12/26.12 tests, all package-compatibility jobs, example smoke, and Docker candidate/cleanup. The separate CodeQL run was in progress at the single status check.
 
 ## Universal Compatibility Phase 03 — Provider Authoring and Generic CI Gate (Complete)
 
@@ -54,7 +56,7 @@
 - `AGENTS.md` now enforces the requested verification budget: one focused check and one final gate, no repeated passing checks/polling loops, and scoped retries only after failure.
 - Existing CI package-compatibility jobs already run `npm run test:package`; no workflow change was needed.
 - Final verification: one `npm run prepublishOnly` passed (164 tests, 1 opt-in Docker skip, 0 failures/cancellations; workspace types, installed-tarball TypeScript scenario, and ESM/CommonJS smoke passed); lint, diagnostics, and diff checks passed. Dependencies were unchanged, so audit was not repeated for Phase 03.
-- Scope audit: only `scripts/package-smoke.js`, `README.md`, `AGENTS.md`, and private notes changed in Phase 03. No engine, API/types, provider, UI, dependency, CI workflow, or credentials changed. No commit/push performed.
+- Scope audit: Phase-03 changes were limited to `scripts/package-smoke.js`, `README.md`, `AGENTS.md`, and private records. The requested commit included only nine approved project files spanning Phases 01–03; `.gitignore` and private `notes/` were excluded. No provider, UI, dependency, package metadata, CI workflow, or credentials changed.
 
 ## Optional Phase 04 — First-Party Provider Integration
 
@@ -107,4 +109,4 @@ No mandatory work remains for the universal provider-neutral contract. An option
 
 ## Worktree Policy
 
-The existing `.gitignore` and Phase-03A helper/test edits predate these universal compatibility phases and remain preserved. Phase-01/02 changes are local and uncommitted. Keep all `notes/` untracked and do not stage, commit, or push them.
+The existing `.gitignore` edit remains local. Phase-01/02/03 project changes were committed and pushed in `511c0d8`. Keep private `notes/` untracked and do not stage, commit, or push them.

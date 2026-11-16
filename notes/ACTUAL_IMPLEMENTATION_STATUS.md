@@ -28,6 +28,7 @@ This records observed behavior, not roadmap promises.
 - Workspace type compile, installed-tarball TypeScript provider scenario, and ESM/CommonJS smoke passed; package contains 17 intended files, 36 KB compressed.
 - Local lint and diagnostics passed; `git diff --check` has no whitespace errors. No dependencies changed in Phase 03; the prior high-severity audit reported 0 vulnerabilities.
 - GitHub Actions run `43778214559` passed all reported jobs on commit `e773671`. That remote run does not include the current uncommitted cleanup refinement.
+- Commit `511c0d882342c9ce778b4e55e335f598b678b9ad` is pushed to `origin/main`; CI run `43786989299` passed all 8 jobs: Node test matrix, package-compatibility matrix, example smoke, and Docker candidate/cleanup. It includes the completed Phase-01/02/03 work.
 
 ## Universal Compatibility Status
 
@@ -46,7 +47,12 @@ This records observed behavior, not roadmap promises.
 ## Local Worktree Overlay
 
 - `.gitignore` has a user edit removing `notes/`; do not change it or stage notes.
-- `testing/traffic-router-contract.js` and `test/testing/traffic-router-contract.test.js` have an uncommitted cleanup-on-validation-failure refinement, covered by the local release gate but not by remote run `43778214559`.
-- Phase-01 local edits are limited to `src/core/engine.js`, `src/types/index.d.ts`, `test/engine.test.js`, `README.md`, and `docs/ARCHITECTURE.md`; no UI/provider/CI/dependency changes were made.
-- Phase-03 local edits are limited to `scripts/package-smoke.js`, `README.md`, `AGENTS.md`, and private notes. No provider, UI, engine/API, dependency, package metadata, or CI workflow changes were made.
-- `package-lock.json` root engine range remains `>=20`, differing from `package.json`; reconcile in a separate package/release phase.
+- Phase-01/02/03 project changes are committed and pushed in `511c0d8`; the successful remote CI run covers them.
+- `.gitignore` remains a local edit and private `notes/` remain untracked and excluded from the commit. No application changes remain unstaged other than that local ignore edit.
+- `package-lock.json` root engine range now matches `package.json`: `^20.19.0 || >=22.12.0`.
+
+## npm Release Readiness
+
+- Package metadata now points to the actual GitHub repository; README badges and CONTRIBUTING URLs are corrected; author/license placeholders are removed; the changelog identifies `0.0.1` as the initial release.
+- Local `npm run prepublishOnly` passed: 164 passed, 1 opt-in Docker test skipped, 0 failed/cancelled. `npm publish --dry-run --ignore-scripts --access public` succeeded with 17 files / 36.7 KB.
+- Package is prepared but not published. `npm view update-pilot` returned 404 before prep; name availability and account permission are not guaranteed. Dry-run warned that the current terminal is not logged in. Actual publish requires npm authentication or the release workflow's `NPM_TOKEN` secret and a `v*` tag.

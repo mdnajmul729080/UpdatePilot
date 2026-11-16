@@ -8,12 +8,12 @@
 
 One-click safe self-hosted update engine for Node.js apps
 
-[![npm version](https://img.shields.io/npm/v/update-pilot)](https://github.com/YOUR_ORG/update-pilot)
-[![npm downloads](https://img.shields.io/npm/dm/update-pilot)](https://github.com/YOUR_ORG/update-pilot)
-[![CI status](https://img.shields.io/github/actions/workflow/status/YOUR_ORG/update-pilot/ci.yml?branch=main)](https://github.com/YOUR_ORG/update-pilot)
-[![License: MIT](https://img.shields.io/github/license/YOUR_ORG/update-pilot)](https://github.com/YOUR_ORG/update-pilot)
+[![npm version](https://img.shields.io/npm/v/update-pilot)](https://www.npmjs.com/package/update-pilot)
+[![npm downloads](https://img.shields.io/npm/dm/update-pilot)](https://www.npmjs.com/package/update-pilot)
+[![CI status](https://img.shields.io/github/actions/workflow/status/mdnajmul729080/UpdatePilot/ci.yml?branch=main)](https://github.com/mdnajmul729080/UpdatePilot/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/github/license/mdnajmul729080/UpdatePilot)](https://github.com/mdnajmul729080/UpdatePilot/blob/main/LICENSE)
 [![Node version: 20.19+ or 22.12+](https://img.shields.io/badge/node-20.19%2B%20%7C%2022.12%2B-brightgreen)](https://nodejs.org/api/modules.html#loading-ecmascript-modules-using-require)
-[![GitHub stars](https://img.shields.io/github/stars/YOUR_ORG/update-pilot)](https://github.com/YOUR_ORG/update-pilot)
+[![GitHub stars](https://img.shields.io/github/stars/mdnajmul729080/UpdatePilot)](https://github.com/mdnajmul729080/UpdatePilot)
 
 > 🚧 **Status: Early Development** — API may change before v1.0.0
 
@@ -51,7 +51,7 @@ function call.
   Release lookup, container operations, and health checks remain separate
   so a future provider can fit the same update lifecycle.
 - **Focused package footprint.** The current compressed npm package is about
-  34 KB; the installed footprint also includes runtime dependencies for Docker
+  36 KB; the installed footprint also includes runtime dependencies for Docker
   operations. The package focuses on update orchestration instead of shipping
   a hosted service or a separate administrative application.
 - **MIT and self-hosted.** Run updates in your own environment and retain

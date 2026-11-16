@@ -49,16 +49,16 @@
     "zero-downtime",
     "nodejs"
   ],
-  "author": "Your Name",
+  "author": "mdnajmul729080",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR_ORG/update-pilot.git"
+    "url": "git+https://github.com/mdnajmul729080/UpdatePilot.git"
   },
   "bugs": {
-    "url": "https://github.com/YOUR_ORG/update-pilot/issues"
+    "url": "https://github.com/mdnajmul729080/UpdatePilot/issues"
   },
-  "homepage": "https://github.com/YOUR_ORG/update-pilot#readme",
+  "homepage": "https://github.com/mdnajmul729080/UpdatePilot#readme",
   "dependencies": {
     "dockerode": "4.0.11",
     "dockerode-compose": "^1.4.0"

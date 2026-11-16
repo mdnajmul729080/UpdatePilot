@@ -20,6 +20,7 @@ The original baseline fix findings were resolved, explicitly disabled, or scoped
 - `test/engine.test.js` tests engine ordering and simulated prepare/health/switch failures. `test/testing/traffic-router-contract.test.js` tests candidate-only health, old-route preservation, switch/rollback, no-switch cleanup, invalid-scenario cleanup, and a deliberately broken prepare implementation.
 - Current local release gate after Universal Compatibility Phase 03: 164 tests passed, 1 opt-in Docker test skipped, 0 failed/cancelled; workspace types, installed-tarball provider scenario types, ESM/CommonJS smoke, lint, and diff check passed.
 - Remote Actions run `43778214559` passed for committed baseline `e773671`, including the three Node test jobs and generic Docker candidate lifecycle. It does not validate the current uncommitted refinement or a named router's production traffic switching.
+- After commit `511c0d8` was pushed, GitHub Actions CI run `43786989299` passed all 8 jobs, including the Node test matrix, package compatibility, example smoke, and Docker candidate/cleanup. The run verifies the published-package TypeScript scenario smoke but does not certify a named router's production traffic switching.
 
 ## Findings and Required Work
 

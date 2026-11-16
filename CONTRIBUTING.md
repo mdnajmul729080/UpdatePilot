@@ -15,14 +15,14 @@ The community's shared standards apply to project spaces and discussions.
 
 ### 🐛 Reporting Bugs
 
-Use the [bug report form](https://github.com/YOUR_ORG/update-pilot/issues/new?template=bug_report.md).
+Use the [GitHub issue tracker](https://github.com/mdnajmul729080/UpdatePilot/issues).
 Include the Node.js version, deployment setup, steps to reproduce, and the
 behavior you expected. Remove secrets and private infrastructure details
 before submitting logs or configuration.
 
 ### 💡 Suggesting Features
 
-Open a topic in [GitHub Discussions](https://github.com/YOUR_ORG/update-pilot/discussions)
+Open a [GitHub issue](https://github.com/mdnajmul729080/UpdatePilot/issues/new)
 to describe the use case and the problem the feature would solve. Adapter
 proposals should explain how they fit the existing adapter contract.
 
@@ -41,10 +41,10 @@ engine can use it for release discovery and deployment recovery. See the
 
 ## Development Setup
 
-Clone the repository and run the test suite with Node.js 20 or later:
+Clone the repository and run the test suite with Node.js `^20.19.0 || >=22.12.0`:
 
 ```bash
-git clone https://github.com/YOUR_ORG/update-pilot.git
+git clone https://github.com/mdnajmul729080/UpdatePilot.git
 cd update-pilot
 npm install
 npm test

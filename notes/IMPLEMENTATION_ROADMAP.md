@@ -75,6 +75,14 @@ Support any traffic router that can control routing for UpdatePilot's Docker-bac
 
 **Acceptance:** The temporary installed consumer imports the helper and compiles a representative TypeScript scenario against the tarball's declarations; README explains provider test invocation; `AGENTS.md` includes a bounded once-per-phase verification policy; existing generic CI runs the updated package smoke without vendor-specific setup. No provider, API, UI, or dependency is added.
 
+**Completed:** The temporary consumer smoke compiles a `.mts` `TrafficRouterContractTestOptions` scenario against the installed tarball. README shows provider test invocation; `AGENTS.md` documents the verification budget. The existing CI package matrix runs this smoke without changes to the workflow.
+
+**Local evidence:** `npm run prepublishOnly` passed (164 tests, 1 opt-in Docker skip, 0 failures/cancellations; workspace types, installed-tarball type check, ESM/CommonJS smoke); lint, diagnostics, and diff checks passed. Package smoke: 17 files, 36 KB compressed.
+
+**Remote evidence:** User-authorized commit `511c0d882342c9ce778b4e55e335f598b678b9ad` was pushed to `origin/main`; GitHub Actions run `43786989299` passed all 8 jobs: Node test matrix (20.19/22.12/26.12), package-compatibility matrix, example smoke, and Docker candidate/cleanup. It includes the fresh-tarball TypeScript scenario check.
+
+**Scope audit:** Phase-03 changes were limited to `scripts/package-smoke.js`, `README.md`, `AGENTS.md`, and private notes. No provider, runtime API, UI, dependency, package metadata, workflow, or credentials changed. `.gitignore` and private notes were excluded from the commit.
+
 ## Phase 04 — Optional First-Party Provider Integration
 
 **Status:** Optional, not a blocker for universal compatibility.
