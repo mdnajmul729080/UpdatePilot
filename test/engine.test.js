@@ -104,14 +104,19 @@ function makeFakeHealth({ healthy = true } = {}) {
 
 function makeFakeTrafficRouter(
   events = [],
-  { prepareError = null, switchError = null, rollbackError = null } = {},
+  {
+    prepareError = null,
+    switchError = null,
+    rollbackError = null,
+    candidateHealthUrl = "http://candidate.test/health",
+  } = {},
 ) {
   return {
     prepare: async () => {
       events.push("prepare");
       if (prepareError) throw prepareError;
       return {
-        healthUrl: "http://candidate.test/health",
+        healthUrl: candidateHealthUrl,
         context: { route: "candidate" },
       };
     },
@@ -224,6 +229,76 @@ test("deployments fail closed when no traffic router is provided", async () => {
   await assert.rejects(pilot.runUpdate(), ConfigError);
 });
 
+test("custom Docker adapter can provide its owned candidate health URL", async () => {
+  const docker = makeFakeDocker();
+  docker.deploy = async () => ({
+    success: true,
+    newContainerId: "new-id",
+    previousContainerId: "prev-id",
+    healthUrl: "http://adapter-candidate.test/health",
+  });
+  let healthUrl;
+  const health = {
+    check: async (options) => {
+      healthUrl = options.url;
+      return makeFakeHealth().check(options);
+    },
+  };
+  const pilot = new UpdatePilot(
+    {
+      repo: "org/app",
+      currentVersion: "1.2.3",
+      docker: { image: "ghcr.io/org/app" },
+      health: { url: "http://x/health" },
+    },
+    {
+      githubAdapter: makeFakeGitHub(),
+      dockerAdapter: docker,
+      healthAdapter: health,
+    },
+  );
+
+  assert.equal((await pilot.runUpdate()).status, "updated");
+  assert.equal(healthUrl, "http://adapter-candidate.test/health");
+});
+
+test("injected router receives the configured live URL instead of adapter health override", async () => {
+  const docker = makeFakeDocker();
+  docker.deploy = async () => ({
+    success: true,
+    newContainerId: "new-id",
+    previousContainerId: "prev-id",
+    healthUrl: "http://adapter-candidate.test/health",
+  });
+  /** @type {Array<{ healthUrl: string }>} */
+  const receivedDeployments = [];
+  const pilot = new UpdatePilot(
+    {
+      repo: "org/app",
+      currentVersion: "1.2.3",
+      docker: { image: "ghcr.io/org/app" },
+      health: { url: "http://x/health" },
+    },
+    {
+      githubAdapter: makeFakeGitHub(),
+      dockerAdapter: docker,
+      healthAdapter: makeFakeHealth(),
+      trafficRouter: {
+        prepare: async (deployment) => {
+          receivedDeployments.push(deployment);
+          return { healthUrl: "http://candidate.test/health" };
+        },
+        switch: async () => {},
+        rollback: async () => {},
+      },
+    },
+  );
+
+  assert.equal((await pilot.runUpdate()).status, "updated");
+  assert.equal(receivedDeployments.length, 1);
+  assert.equal(receivedDeployments[0].healthUrl, "http://x/health");
+});
+
 test("health failure restores routing before rolling back Docker", async () => {
   const events = [];
   const docker = makeFakeDocker();
@@ -271,6 +346,68 @@ test("router switch failure restores both route and candidate", async () => {
   assert.equal(docker.calls.finalize, 0);
 });
 
+test("switch rollback receives the same opaque context after partial route change", async () => {
+  const events = [];
+  const preparationContext = { routeId: "candidate-route" };
+  const route = { current: "old" };
+  let deployment;
+  /** @type {Array<{ deployment: unknown, context: unknown, reason: string }>} */
+  const rollbackCalls = [];
+  const trafficRouter = {
+    prepare: async (receivedDeployment) => {
+      events.push("prepare");
+      deployment = receivedDeployment;
+      return {
+        healthUrl: "http://candidate.test/health",
+        context: preparationContext,
+      };
+    },
+    switch: async (_deployment, context) => {
+      events.push("switch");
+      assert.strictEqual(context, preparationContext);
+      route.current = "candidate";
+      throw new Error("switch partially applied");
+    },
+    rollback: async (receivedDeployment, context, reason) => {
+      events.push("router-rollback");
+      rollbackCalls.push({
+        deployment: receivedDeployment,
+        context,
+        reason,
+      });
+      route.current = "old";
+    },
+  };
+  const docker = makeFakeDocker();
+  const dockerRollback = docker.rollback;
+  docker.rollback = async () => {
+    events.push("docker-rollback");
+    return dockerRollback();
+  };
+  const { pilot } = makePilot({ docker, trafficRouter });
+
+  await assert.rejects(
+    pilot.runUpdate(),
+    (error) =>
+      error instanceof UpdatePilotError && error.context.phase === "switch",
+  );
+
+  assert.deepEqual(events, [
+    "prepare",
+    "switch",
+    "router-rollback",
+    "docker-rollback",
+  ]);
+  assert.equal(rollbackCalls.length, 1);
+  const [rollbackCall] = rollbackCalls;
+  assert.ok(rollbackCall);
+  assert.strictEqual(rollbackCall.deployment, deployment);
+  assert.strictEqual(rollbackCall.context, preparationContext);
+  assert.equal(rollbackCall.reason, "switch-failed");
+  assert.equal(route.current, "old");
+  assert.equal(docker.calls.finalize, 0);
+});
+
 test("router preparation failure removes the candidate and preserves the old route", async () => {
   const events = [];
   const docker = makeFakeDocker();
@@ -279,15 +416,88 @@ test("router preparation failure removes the candidate and preserves the old rou
     events.push("docker-rollback");
     return dockerRollback();
   };
+  const trafficRouter = makeFakeTrafficRouter(events, {
+    prepareError: new Error("candidate route unavailable"),
+  });
+  let rollbackArguments;
+  const routerRollback = trafficRouter.rollback;
+  trafficRouter.rollback = async (...args) => {
+    rollbackArguments = args;
+    return routerRollback(...args);
+  };
   const { pilot } = makePilot({
     docker,
-    trafficRouter: makeFakeTrafficRouter(events, {
-      prepareError: new Error("candidate route unavailable"),
-    }),
+    trafficRouter,
   });
 
   await assert.rejects(pilot.runUpdate(), UpdatePilotError);
   assert.deepEqual(events, ["prepare", "router-rollback", "docker-rollback"]);
+  assert.ok(rollbackArguments);
+  assert.equal(rollbackArguments[1], undefined);
+  assert.equal(rollbackArguments[2], "prepare-failed");
+});
+
+test("invalid candidate health URLs are rolled back before health verification", async (t) => {
+  const cases = [
+    { name: "malformed URL", candidateHealthUrl: "not a URL" },
+    {
+      name: "unsupported protocol",
+      candidateHealthUrl: "ftp://candidate.test/health",
+    },
+    {
+      name: "configured live endpoint",
+      candidateHealthUrl: "http://x/health",
+    },
+    {
+      name: "live endpoint with a fragment",
+      candidateHealthUrl: "http://x/health#candidate",
+    },
+  ];
+
+  for (const { name, candidateHealthUrl } of cases) {
+    await t.test(name, async () => {
+      const events = [];
+      const { pilot, docker, health } = makePilot({
+        trafficRouter: makeFakeTrafficRouter(events, { candidateHealthUrl }),
+      });
+
+      await assert.rejects(pilot.runUpdate(), (error) => {
+        assert.ok(error instanceof ConfigError);
+        assert.equal(error.context.field, "trafficRouter.prepare.healthUrl");
+        assert.equal(error.context.phase, "deploy");
+        return true;
+      });
+      assert.deepEqual(events, ["prepare", "router-rollback"]);
+      assert.equal(health.calls, 0);
+      assert.equal(docker.calls.rollback, 1);
+      assert.equal(docker.calls.finalize, 0);
+    });
+  }
+});
+
+test("accepts a distinct HTTPS candidate health URL", async () => {
+  const events = [];
+  const health = {
+    ...makeFakeHealth(),
+    /** @param {{ url?: string }} [options] */
+    check: async ({ url } = {}) => {
+      events.push(`health:${url}`);
+      return makeFakeHealth().check({ url });
+    },
+  };
+  const { pilot } = makePilot({
+    health,
+    trafficRouter: makeFakeTrafficRouter(events, {
+      candidateHealthUrl: "https://candidate.test/ready",
+    }),
+  });
+
+  assert.equal((await pilot.runUpdate()).status, "updated");
+  assert.deepEqual(events, [
+    "prepare",
+    "health:https://candidate.test/ready",
+    "switch",
+  ]);
 });
 
 test("checkOnly returns update information without touching Docker", async () => {

@@ -63,6 +63,41 @@ describe("defineTrafficRouterContractTests", () => {
     createScenario: createScenarioFactory(),
   });
 
+  it("cleans provider resources when scenario validation fails", () => {
+    const moduleUrl = new URL(
+      "../../testing/traffic-router-contract.js",
+      import.meta.url,
+    ).href;
+    const source = `
+      import { defineTrafficRouterContractTests } from ${JSON.stringify(moduleUrl)};
+      defineTrafficRouterContractTests({
+        providerName: "incomplete provider",
+        createScenario: async () => ({
+          deployment: { healthUrl: "http://app.test/health" },
+          trafficRouter: {
+            prepare: async () => ({ healthUrl: "http://candidate.test/ready" }),
+            switch: async () => {},
+            rollback: async () => {},
+          },
+          verifyCandidateHealth: async () => {},
+          assertOldRouteActive: async () => {},
+          assertPreparationCleaned: async () => {},
+          cleanup: async () => console.log("scenario-cleanup-ran"),
+        }),
+      });
+    `;
+    const result = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", source],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+    const output = `${result.stdout}${result.stderr}`;
+
+    assert.notEqual(result.status, 0);
+    assert.match(output, /must implement assertCandidateRouteActive/);
+    assert.match(output, /scenario-cleanup-ran/);
+  });
+
   it("fails when prepare switches away from the old route", () => {
     const moduleUrl = new URL(
       "../../testing/traffic-router-contract.js",
@@ -87,7 +122,7 @@ describe("defineTrafficRouterContractTests", () => {
             assertOldRouteActive: async () => assert.equal(state.route, "old", "prepare must preserve the old route"),
             assertCandidateRouteActive: async () => {},
             assertPreparationCleaned: async () => {},
-            cleanup: async () => {},
+            cleanup: async () => console.log("broken-provider-cleanup-ran"),
           };
         },
       });
@@ -99,6 +134,46 @@ describe("defineTrafficRouterContractTests", () => {
     );
 
     assert.notEqual(result.status, 0);
-    assert.match(`${result.stdout}${result.stderr}`, /ERR_ASSERTION/);
+    const output = `${result.stdout}${result.stderr}`;
+    assert.match(output, /ERR_ASSERTION/);
+    assert.match(output, /broken-provider-cleanup-ran/);
+  });
+
+  it("rejects a candidate health URL that differs only by a fragment", () => {
+    const moduleUrl = new URL(
+      "../../testing/traffic-router-contract.js",
+      import.meta.url,
+    ).href;
+    const source = `
+      import { defineTrafficRouterContractTests } from ${JSON.stringify(moduleUrl)};
+      defineTrafficRouterContractTests({
+        providerName: "fragment-only candidate provider",
+        createScenario: async () => ({
+          deployment: { healthUrl: "http://app.test/health" },
+          trafficRouter: {
+            prepare: async () => ({ healthUrl: "http://app.test/health#candidate" }),
+            switch: async () => {},
+            rollback: async () => {},
+          },
+          verifyCandidateHealth: async () => {},
+          assertOldRouteActive: async () => {},
+          assertCandidateRouteActive: async () => {},
+          assertPreparationCleaned: async () => {},
+          cleanup: async () => {},
+        }),
+      });
+    `;
+    const result = spawnSync(
+      process.execPath,
+      ["--input-type=module", "-e", source],
+      { encoding: "utf8", timeout: 10_000 },
+    );
+    const output = `${result.stdout}${result.stderr}`;
+
+    assert.notEqual(result.status, 0);
+    assert.match(
+      output,
+      /candidate healthUrl must not probe the live deployment endpoint/,
+    );
   });
 });

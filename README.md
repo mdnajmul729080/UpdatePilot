@@ -215,17 +215,33 @@ GitHub Releases → Pull candidate → Prepare router endpoint
 
 ### Traffic Router Provider
 
-The `trafficRouter` dependency is a provider-neutral interface selected by
-each application. Implement `prepare(deployment)` to return a candidate-only
-`healthUrl` and optional opaque `context`; implement `switch(deployment,
-context)` to route production traffic to the candidate; implement
-`rollback(deployment, context, reason)` to restore the prior route or discard
-prepared state. `rollback()` should be idempotent and safe after either a
-health failure or a partial switch failure.
+The `trafficRouter` dependency is a provider-neutral interface supplied by
+each application. `prepare(deployment)` must keep the old route active and
+return an absolute HTTP(S) candidate-only `healthUrl` distinct from
+`deployment.healthUrl`, plus optional opaque `context`. The engine rejects an
+invalid URL or the unchanged live health URL and attempts rollback before
+health verification. This URL check does not prove which backend a provider
+actually routes to; the provider's integration test must assert candidate-only
+reachability.
+
+If `prepare()` rejects before returning its context, it must clean up any
+partial resources itself. The engine also calls
+`rollback(deployment, undefined, "prepare-failed")` for cleanup. `switch()`
+must resolve only after the candidate route is active; if it rejects after a
+partial change, `rollback(deployment, context, reason)` must restore the old
+route. `rollback()` must be idempotent because automatic route cleanup can be
+followed by manual recovery, and because preparation may fail without context.
+If no prior route exists, rollback must leave the candidate unrouted.
+
+A custom Docker adapter may own the handoff without an injected `trafficRouter`.
+In that path, its optional `DockerDeployResult.healthUrl` supplies the candidate
+health target; the adapter owns route safety and candidate-only reachability.
+The engine's internal no-op router does not certify that adapter's traffic
+switching.
 
 The deployment argument includes the old and candidate container IDs, version
-transition, configured health URL, and candidate port mappings. The provider
-must keep the old route active until `switch()` is called. UpdatePilot fails
+transition, live health URL, and candidate port mappings. The provider must
+keep the old route active until `switch()` is called. UpdatePilot fails
 closed before deployment when its built-in Docker adapter is used without a
 valid provider. A custom Docker adapter may own the handoff itself. No
 Traefik, Caddy, Nginx, or other built-in provider is included; the application
@@ -261,6 +277,10 @@ defineTrafficRouterContractTests({
   },
 });
 ```
+
+Place this registration in a provider test file such as
+`test/traffic-router-contract.test.js` and run it with `node --test` (or the
+provider project's test command).
 
 The provider supplies isolated infrastructure and assertions that inspect its
 actual route state. The suite checks candidate-only health, preservation of the

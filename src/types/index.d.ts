@@ -219,26 +219,45 @@ declare module "update-pilot" {
     latencyMs: number;
     checkedAt: string;
   }
+  /** Deployment data supplied to a provider for one Docker candidate update. */
   export interface TrafficRouterDeployment {
     from: string;
     to: string | null;
+    /** Live health endpoint for an injected router; adapter-owned handoff may override it. */
     healthUrl: string;
     previousContainerId: string | null;
     newContainerId: string | null;
     candidatePorts: Record<string, Array<{ HostIp: string; HostPort: string }>>;
   }
+  /** Candidate-only health endpoint and opaque state returned by prepare(). */
   export interface TrafficRouterPreparation {
     healthUrl: string;
     context?: unknown;
   }
+  /**
+   * Provider contract for switching traffic to a healthy Docker candidate.
+   * The old route must remain active until switch() is called.
+   */
   export interface TrafficRouter {
+    /**
+     * Prepare candidate routing without changing the live route. Return an
+     * absolute HTTP(S) candidate-only health URL distinct from deployment.healthUrl.
+     * Clean partial work before rejecting; the engine also attempts rollback
+     * with undefined context when preparation rejects before returning state.
+     */
     prepare(
       deployment: TrafficRouterDeployment,
     ): Promise<TrafficRouterPreparation>;
+    /** Resolve only after the candidate route is active; reject on partial failure. */
     switch(
       deployment: TrafficRouterDeployment,
       context?: unknown,
     ): Promise<void>;
+    /**
+     * Restore the prior route and clear prepared state. This must be idempotent,
+     * including repeated recovery calls and calls with undefined context. If
+     * there is no prior route, ensure the candidate is not routed.
+     */
     rollback(
       deployment: TrafficRouterDeployment,
       context?: unknown,
@@ -249,6 +268,7 @@ declare module "update-pilot" {
     success: true;
     newContainerId: string | null;
     previousContainerId: string | null;
+    /** Candidate health endpoint when a custom Docker adapter owns handoff. */
     healthUrl?: string;
     candidatePorts?: Record<
       string,

@@ -153,10 +153,32 @@ successful.
 
 Provider packages can import `defineTrafficRouterContractTests` from
 `update-pilot/testing/traffic-router-contract` and supply a fresh, isolated
-scenario for each test. The scenario provides the router and deployment data,
-checks that the health URL reaches only the candidate, verifies old-route
-preservation and candidate switching, confirms rollback and preparation
-cleanup, and releases its test resources in `cleanup()`.
+scenario for each test. The provider contract keeps the old route active during
+preparation and candidate health verification. `prepare()` returns an absolute
+HTTP(S) candidate-only health URL distinct from the deployment's live health
+URL and an optional opaque context. The engine validates the URL's syntax,
+protocol, and difference from the configured live URL; only a provider's
+isolated route assertion can prove that the endpoint actually reaches only the
+candidate.
+
+If `prepare()` rejects before returning context, the provider cleans partial
+work before rejecting; the engine also invokes idempotent rollback with
+undefined context. `switch()` resolves only when the candidate route is active.
+If switching partially changes routing and then fails, rollback must restore
+the previous route. `rollback()` is idempotent and clears temporary state, so it
+is safe after preparation/health/switch failures and repeated manual recovery.
+When no previous route exists, rollback leaves the candidate unrouted.
+
+This contract applies when an external `TrafficRouter` is injected. A custom
+Docker adapter may instead own the handoff; when no router is injected, its
+optional `DockerDeployResult.healthUrl` supplies the candidate health target
+and the engine uses an internal no-op router. That path remains the adapter's
+responsibility and is not certified by the provider conformance suite.
+
+The scenario supplies the router and deployment data, checks candidate-only
+health, verifies old-route preservation and candidate switching, confirms
+rollback and preparation cleanup, and releases its test resources in
+`cleanup()`.
 
 These tests standardize observable behavior without binding the engine to a
 proxy or control plane. They do not install a router, emulate production

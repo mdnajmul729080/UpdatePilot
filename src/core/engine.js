@@ -48,6 +48,7 @@ export class UpdatePilot {
     this._docker = deps.dockerAdapter;
     this._health = deps.healthAdapter;
     this._trafficRouter = deps.trafficRouter;
+    this._adapterOwnsHandoff = false;
     this._engineSince = new Date().toISOString();
     this._runStartedAt = null;
     this._running = false;
@@ -195,7 +196,9 @@ export class UpdatePilot {
       const trafficDeployment = {
         from: currentVersion,
         to: latestVersion,
-        healthUrl: deployResult.healthUrl ?? this._config.health.url,
+        healthUrl: this._adapterOwnsHandoff
+          ? (deployResult.healthUrl ?? this._config.health.url)
+          : this._config.health.url,
         previousContainerId: deployResult.previousContainerId ?? null,
         newContainerId: deployResult.newContainerId ?? null,
         candidatePorts: deployResult.candidatePorts ?? {},
@@ -209,12 +212,34 @@ export class UpdatePilot {
       let preparation;
       try {
         preparation = await trafficRouter.prepare(trafficDeployment);
+        trafficState.context = preparation?.context;
         if (!preparation || typeof preparation.healthUrl !== "string")
           throw new ConfigError(
             "trafficRouter.prepare() must return a candidate healthUrl",
             { context: { field: "trafficRouter.prepare.healthUrl" } },
           );
-        trafficState.context = preparation.context;
+        let candidateHealthUrl;
+        try {
+          candidateHealthUrl = new URL(preparation.healthUrl);
+        } catch {
+          throw new ConfigError(
+            "trafficRouter.prepare() must return an absolute HTTP or HTTPS candidate healthUrl",
+            { context: { field: "trafficRouter.prepare.healthUrl" } },
+          );
+        }
+        candidateHealthUrl.hash = "";
+        const liveHealthUrl = new URL(trafficDeployment.healthUrl);
+        liveHealthUrl.hash = "";
+        if (
+          (candidateHealthUrl.protocol !== "http:" &&
+            candidateHealthUrl.protocol !== "https:") ||
+          (!this._adapterOwnsHandoff &&
+            candidateHealthUrl.href === liveHealthUrl.href)
+        )
+          throw new ConfigError(
+            "trafficRouter.prepare() must return a candidate-only HTTP or HTTPS healthUrl distinct from the live healthUrl",
+            { context: { field: "trafficRouter.prepare.healthUrl" } },
+          );
       } catch (prepareError) {
         try {
           await this._rollbackDeployment(
@@ -479,6 +504,7 @@ export class UpdatePilot {
     )
       return router;
     if (!router && this._docker && !(this._docker instanceof DockerAdapter)) {
+      this._adapterOwnsHandoff = true;
       this._trafficRouter = {
         prepare: async (deployment) => ({ healthUrl: deployment.healthUrl }),
         switch: async () => {},

@@ -24,11 +24,11 @@ function assertScenario(scenario) {
 
 async function withScenario(createScenario, verify) {
   const scenario = await createScenario();
-  assertScenario(scenario);
   try {
+    assertScenario(scenario);
     await verify(scenario);
   } finally {
-    await scenario.cleanup();
+    if (typeof scenario?.cleanup === "function") await scenario.cleanup();
   }
 }
 
@@ -42,6 +42,8 @@ async function prepareCandidate(scenario) {
 
   const candidateUrl = new URL(preparation.healthUrl);
   const configuredUrl = new URL(deployment.healthUrl);
+  candidateUrl.hash = "";
+  configuredUrl.hash = "";
   assert.ok(
     candidateUrl.protocol === "http:" || candidateUrl.protocol === "https:",
     "candidate healthUrl must use HTTP or HTTPS",
@@ -96,9 +98,16 @@ export function defineTrafficRouterContractTests({
       });
     });
 
-    it("cleans prepared state and preserves the old route without switching", async () => {
+    it("rolls back after candidate health verification fails", async () => {
       await withScenario(createScenario, async (scenario) => {
         const preparation = await prepareCandidate(scenario);
+        await assert.rejects(async () => {
+          await scenario.verifyCandidateHealth(
+            preparation,
+            scenario.deployment,
+          );
+          throw new Error("simulated candidate health failure");
+        }, /simulated candidate health failure/);
         await scenario.trafficRouter.rollback(
           scenario.deployment,
           preparation.context,
@@ -106,6 +115,62 @@ export function defineTrafficRouterContractTests({
         );
         await scenario.assertOldRouteActive();
         await scenario.assertPreparationCleaned();
+      });
+    });
+
+    it("rolls back prepared state when context is unavailable", async () => {
+      await withScenario(createScenario, async (scenario) => {
+        await prepareCandidate(scenario);
+        await scenario.trafficRouter.rollback(
+          scenario.deployment,
+          undefined,
+          "prepare-failed",
+        );
+        await scenario.assertOldRouteActive();
+        await scenario.assertPreparationCleaned();
+      });
+    });
+
+    it("restores the old route when switch fails after changing it", async () => {
+      await withScenario(createScenario, async (scenario) => {
+        const preparation = await prepareCandidate(scenario);
+        await scenario.verifyCandidateHealth(preparation, scenario.deployment);
+        await assert.rejects(async () => {
+          await scenario.trafficRouter.switch(
+            scenario.deployment,
+            preparation.context,
+          );
+          await scenario.assertCandidateRouteActive();
+          throw new Error("simulated switch failure after route mutation");
+        }, /simulated switch failure after route mutation/);
+        await scenario.trafficRouter.rollback(
+          scenario.deployment,
+          preparation.context,
+          "switch-failed",
+        );
+        await scenario.assertOldRouteActive();
+        await scenario.assertPreparationCleaned();
+      });
+    });
+
+    it("keeps rollback safe when invoked repeatedly", async () => {
+      await withScenario(createScenario, async (scenario) => {
+        const preparation = await prepareCandidate(scenario);
+        await scenario.verifyCandidateHealth(preparation, scenario.deployment);
+        await scenario.trafficRouter.switch(
+          scenario.deployment,
+          preparation.context,
+        );
+        await scenario.assertCandidateRouteActive();
+        for (const reason of ["health-check-failed", "manual"]) {
+          await scenario.trafficRouter.rollback(
+            scenario.deployment,
+            preparation.context,
+            reason,
+          );
+          await scenario.assertOldRouteActive();
+          await scenario.assertPreparationCleaned();
+        }
       });
     });
   });

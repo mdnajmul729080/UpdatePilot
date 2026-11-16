@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -74,6 +74,70 @@ try {
     "fresh tarball install",
   );
 
+  const typeFixturePath = join(
+    consumerDirectory,
+    "traffic-router-contract.mts",
+  );
+  await writeFile(
+    typeFixturePath,
+    `import {
+  defineTrafficRouterContractTests,
+  type TrafficRouterContractTestOptions,
+} from "update-pilot/testing/traffic-router-contract";
+
+const options: TrafficRouterContractTestOptions = {
+  providerName: "tarball type smoke",
+  createScenario: async () => ({
+    trafficRouter: {
+      prepare: async () => ({ healthUrl: "http://candidate.test/health" }),
+      switch: async () => {},
+      rollback: async () => {},
+    },
+    deployment: {
+      from: "1.2.3",
+      to: "1.3.0",
+      healthUrl: "http://app.test/health",
+      previousContainerId: "previous",
+      newContainerId: "candidate",
+      candidatePorts: {},
+    },
+    verifyCandidateHealth: async (preparation, deployment) => {
+      void preparation.healthUrl;
+      void deployment.to;
+    },
+    assertOldRouteActive: async () => {},
+    assertCandidateRouteActive: async () => {},
+    assertPreparationCleaned: async () => {},
+    cleanup: async () => {},
+  }),
+};
+
+defineTrafficRouterContractTests(options);
+`,
+    "utf8",
+  );
+  runNpm(
+    [
+      "exec",
+      "--yes",
+      "--package",
+      "typescript@5.9.3",
+      "--",
+      "tsc",
+      "--noEmit",
+      "--strict",
+      "--module",
+      "NodeNext",
+      "--moduleResolution",
+      "NodeNext",
+      "--target",
+      "ES2022",
+      typeFixturePath,
+    ],
+    consumerDirectory,
+    "fresh tarball TypeScript provider scenario compile",
+  );
+
   runNode(
     [
       "-e",
@@ -113,7 +177,7 @@ try {
   );
 
   console.log(
-    `Fresh ESM/CommonJS install passed: ${packageFiles.length} files, ${Math.round(packageInfo.size / 1024)} KB compressed`,
+    `Fresh ESM/CommonJS and TypeScript consumer smoke passed: ${packageFiles.length} files, ${Math.round(packageInfo.size / 1024)} KB compressed`,
   );
 } finally {
   await rm(temporaryDirectory, { recursive: true, force: true });
